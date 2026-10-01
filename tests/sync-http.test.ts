@@ -65,6 +65,15 @@ async function getJson(url: string): Promise<{ status: number; body: any }> {
   return { status: response.status, body: await response.json() };
 }
 
+async function postJson(url: string, body: unknown): Promise<{ status: number; body: any }> {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return { status: response.status, body: await response.json() };
+}
+
 describe('Sync HTTP server', () => {
   it('returns an empty status for an empty node', async () => {
     const node = await startNode('node-empty', 'sync-http-empty');
@@ -184,7 +193,7 @@ describe('Sync HTTP server', () => {
     }
   });
 
-  it('returns 404 for unknown routes and 405 for POST requests', async () => {
+  it('returns 404 for unknown routes and 405 for POST status requests', async () => {
     const node = await startNode('node-local', 'sync-http-methods');
     try {
       const unknown = await getJson(`${node.baseUrl}/unknown`);
@@ -192,8 +201,6 @@ describe('Sync HTTP server', () => {
 
       const statusPost = await fetch(`${node.baseUrl}/sync/status`, { method: 'POST' });
       assert.strictEqual(statusPost.status, 405);
-      const operationsPost = await fetch(`${node.baseUrl}/sync/operations`, { method: 'POST' });
-      assert.strictEqual(operationsPost.status, 405);
     } finally {
       await stopNode(node);
     }
@@ -244,6 +251,64 @@ describe('Sync HTTP server', () => {
 
       assert.deepStrictEqual(node.operationManager.getSequenceVector(), before);
       assert.strictEqual(node.operationManager.getAllOperations().length, 1);
+    } finally {
+      await stopNode(node);
+    }
+  });
+
+  it('accepts remote operations through POST and reports results', async () => {
+    const node = await startNode('node-local', 'sync-http-post-success');
+    try {
+      const operation = remoteOperation('http-remote-1', 'node-remote', 1, 'http-remote-1');
+      const result = await postJson(`${node.baseUrl}/sync/operations`, { operations: [operation] });
+
+      assert.strictEqual(result.status, 200);
+      assert.deepStrictEqual(result.body.summary, { applied: 1, duplicates: 0, rejected: 0 });
+      assert.strictEqual(result.body.results[0].outcome, 'applied');
+      assert.strictEqual(node.operationManager.getOperation(operation.operationId)?.checksum, operation.checksum);
+    } finally {
+      await stopNode(node);
+    }
+  });
+
+  it('rejects invalid POST bodies and oversized requests', async () => {
+    const node = await startNode('node-local', 'sync-http-post-validation');
+    try {
+      const invalidJsonResponse = await fetch(`${node.baseUrl}/sync/operations`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{"operations":',
+      });
+      assert.strictEqual(invalidJsonResponse.status, 400);
+
+      const nonArray = await postJson(`${node.baseUrl}/sync/operations`, { operations: {} });
+      assert.strictEqual(nonArray.status, 400);
+
+      const tooMany = await postJson(
+        `${node.baseUrl}/sync/operations`,
+        { operations: new Array(1001).fill(null) }
+      );
+      assert.strictEqual(tooMany.status, 400);
+
+      const oversizedResponse = await fetch(`${node.baseUrl}/sync/operations`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'content-length': String(5 * 1024 * 1024 + 1),
+        },
+        body: 'x'.repeat(5 * 1024 * 1024 + 1),
+      });
+      assert.strictEqual(oversizedResponse.status, 413);
+    } finally {
+      await stopNode(node);
+    }
+  });
+
+  it('returns 405 for PUT to the operations endpoint', async () => {
+    const node = await startNode('node-local', 'sync-http-post-method');
+    try {
+      const response = await fetch(`${node.baseUrl}/sync/operations`, { method: 'PUT' });
+      assert.strictEqual(response.status, 405);
     } finally {
       await stopNode(node);
     }

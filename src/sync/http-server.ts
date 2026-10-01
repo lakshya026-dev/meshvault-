@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { OperationManager } from '../operations/operation-manager.js';
+import { SyncManager } from './sync-manager.js';
 
 export interface SyncHttpServer {
   start(port?: number, host?: string): Promise<number>;
@@ -41,9 +42,58 @@ function requestPath(request: IncomingMessage): URL {
   return new URL(request.url ?? '/', 'http://127.0.0.1');
 }
 
+const MAX_BODY_BYTES = 5 * 1024 * 1024;
+
+function readJsonBody(request: IncomingMessage): Promise<unknown | null> {
+  return new Promise((resolve, reject) => {
+    const contentLength = request.headers['content-length'];
+    if (contentLength && Number(contentLength) > MAX_BODY_BYTES) {
+      request.pause();
+      resolve(null);
+      return;
+    }
+
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let tooLarge = false;
+    let settled = false;
+    request.on('data', (chunk: Buffer) => {
+      if (settled) {
+        return;
+      }
+      totalBytes += chunk.length;
+      if (totalBytes > MAX_BODY_BYTES) {
+        tooLarge = true;
+        settled = true;
+        request.pause();
+        resolve(null);
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on('end', () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (tooLarge) {
+        resolve(null);
+        return;
+      }
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+      } catch (error) {
+        reject(error);
+      }
+    });
+    request.on('error', reject);
+  });
+}
+
 export function createSyncHttpServer(
   operationManager: OperationManager,
-  localNodeId: string
+  localNodeId: string,
+  syncManager = new SyncManager(operationManager, localNodeId)
 ): SyncHttpServer {
   let server: Server | null = null;
   let listeningPort: number | null = null;
@@ -63,17 +113,58 @@ export function createSyncHttpServer(
       return;
     }
 
-    if (request.method !== 'GET') {
+    if (url.pathname === '/sync/status' && request.method !== 'GET') {
+      writeJson(response, 405, { error: 'Method not allowed.' });
+      return;
+    }
+
+    if (url.pathname === '/sync/operations' && request.method !== 'GET' && request.method !== 'POST') {
       writeJson(response, 405, { error: 'Method not allowed.' });
       return;
     }
 
     try {
       if (url.pathname === '/sync/status') {
-        writeJson(response, 200, {
-          nodeId: localNodeId,
-          sequences: operationManager.getSequenceVector(),
-        });
+        writeJson(response, 200, syncManager.getSyncStatus());
+        return;
+      }
+
+      if (request.method === 'POST') {
+        if (request.headers['content-length'] && Number(request.headers['content-length']) > MAX_BODY_BYTES) {
+          request.pause();
+          writeJson(response, 413, { error: 'Request body exceeds 5 MB.' });
+          return;
+        }
+        readJsonBody(request)
+          .then((body) => {
+            if (body === null) {
+              writeJson(response, 413, { error: 'Request body exceeds 5 MB.' });
+              return;
+            }
+            if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+              writeJson(response, 400, { error: 'Request body must be a JSON object.' });
+              return;
+            }
+            const operations = (body as { operations?: unknown }).operations;
+            if (!Array.isArray(operations)) {
+              writeJson(response, 400, { error: 'operations must be an array.' });
+              return;
+            }
+            if (operations.length > 1000) {
+              writeJson(response, 400, { error: 'operations must contain at most 1000 entries.' });
+              return;
+            }
+            try {
+              writeJson(response, 200, syncManager.receiveOperations(operations));
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              writeJson(response, 500, { error: message });
+            }
+          })
+          .catch((error) => {
+            const message = error instanceof Error ? error.message : String(error);
+            writeJson(response, error instanceof SyntaxError ? 400 : 500, { error: message });
+          });
         return;
       }
 
