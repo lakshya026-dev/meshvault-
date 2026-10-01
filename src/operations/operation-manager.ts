@@ -89,7 +89,7 @@ export class OperationManager {
       }
 
       // Validate entity state before creating operation
-      const existingRecord = this.getRecord(input.entityId);
+      const existingRecord = this.getRecord(input.entityId, input.entityType);
       if (input.operationType === 'CREATE' && existingRecord) {
         throw new EntityAlreadyExistsError(input.entityType, input.entityId);
       }
@@ -237,7 +237,7 @@ export class OperationManager {
       }
 
       // Apply changes to records table
-      const existingRecord = this.getRecord(operation.entityId);
+      const existingRecord = this.getRecord(operation.entityId, operation.entityType);
 
       switch (operation.operationType) {
         case 'CREATE': {
@@ -269,18 +269,18 @@ export class OperationManager {
               .prepare(
                 `UPDATE records
                  SET data = ?, updated_at = ?
-                 WHERE id = ?`
+                WHERE entity_type = ? AND id = ?`
               )
-              .run(JSON.stringify(mergedData), now, operation.entityId);
+              .run(JSON.stringify(mergedData), now, operation.entityType, operation.entityId);
           }
           break;
         }
 
         case 'DELETE': {
           if (existingRecord) {
-            rawDb
-              .prepare('DELETE FROM records WHERE id = ?')
-              .run(operation.entityId);
+              rawDb
+                .prepare('DELETE FROM records WHERE entity_type = ? AND id = ?')
+                .run(operation.entityType, operation.entityId);
           }
           break;
         }
@@ -402,12 +402,21 @@ export class OperationManager {
   }
 
   public getRecord<T extends Record<string, unknown> = Record<string, unknown>>(
-    id: string
+    id: string,
+    entityType?: string
   ): RecordEntity<T> | null {
     const rawDb = this.dbManager.getRawDb();
-    const row = (rawDb
-      .prepare('SELECT * FROM records WHERE id = ?')
-      .get(id) as unknown) as RawRecordRow | undefined;
+    let row: RawRecordRow | undefined;
+    if (entityType) {
+      row = rawDb
+        .prepare('SELECT * FROM records WHERE entity_type = ? AND id = ?')
+        .get(entityType, id) as RawRecordRow | undefined;
+    } else {
+      const matches = rawDb
+        .prepare('SELECT * FROM records WHERE id = ?')
+        .all(id) as unknown as RawRecordRow[];
+      row = matches.length === 1 ? matches[0] : undefined;
+    }
 
     return row ? this.mapRowToRecord<T>(row) : null;
   }

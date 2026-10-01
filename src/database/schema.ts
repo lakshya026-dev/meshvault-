@@ -5,14 +5,15 @@ CREATE TABLE IF NOT EXISTS node_info (
 );
 
 CREATE TABLE IF NOT EXISTS records (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL,
   entity_type TEXT NOT NULL,
   data TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (entity_type, id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_records_entity_type ON records(entity_type);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_records_entity_id_type ON records(entity_type, id);
 
 CREATE TABLE IF NOT EXISTS operations (
   operation_id TEXT PRIMARY KEY,

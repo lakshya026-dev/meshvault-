@@ -115,14 +115,15 @@ CREATE TABLE IF NOT EXISTS node_info (
 );
 
 CREATE TABLE IF NOT EXISTS records (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL,
   entity_type TEXT NOT NULL,
   data TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (entity_type, id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_records_entity_type ON records(entity_type);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_records_entity_id_type ON records(entity_type, id);
 
 CREATE TABLE IF NOT EXISTS operations (
   operation_id TEXT PRIMARY KEY,
@@ -268,3 +269,7 @@ npm test
 1. **Standalone Offline Operation**: No remote synchronization, WebSocket, or REST transport is present.
 2. **Local Sequence Numbers**: Sequence numbers are strictly node-local. Distributed vector clocks and conflict resolution belong to future phases.
 3. **Single Active Writer**: Single node process per SQLite database file via WAL mode.
+4. **Canonical Entity Identity**: A record is identified by the pair `(entity_type, id)`.
+   CREATE, UPDATE, DELETE, replay, and idempotency checks use both fields. The
+   compatibility `getRecord(id)` lookup returns a record only when that ID is
+   unambiguous.
