@@ -4,11 +4,15 @@ import { DatabaseManager } from './database/db.js';
 import { NodeConfig } from './config/node.js';
 import { OperationManager } from './operations/operation-manager.js';
 import { MeshVaultError } from './errors.js';
+import { SyncManager } from './sync/sync-manager.js';
+import { createSyncHttpServer, type SyncHttpServer } from './sync/http-server.js';
 
 export interface MeshVaultApp {
   db: DatabaseManager;
   nodeConfig: NodeConfig;
   opManager: OperationManager;
+  syncManager: SyncManager;
+  syncServer: SyncHttpServer;
   dbPath: string;
 }
 
@@ -17,8 +21,10 @@ export function initMeshVault(customDbPath?: string, preferredNodeId?: string): 
   const db = new DatabaseManager({ dbPath });
   const nodeConfig = new NodeConfig(db, preferredNodeId);
   const opManager = new OperationManager(db, nodeConfig);
+  const syncManager = new SyncManager(opManager, nodeConfig.getNodeId());
+  const syncServer = createSyncHttpServer(opManager, nodeConfig.getNodeId(), syncManager);
 
-  return { db, nodeConfig, opManager, dbPath };
+  return { db, nodeConfig, opManager, syncManager, syncServer, dbPath };
 }
 
 function printHeader(app: MeshVaultApp): void {
@@ -33,6 +39,8 @@ function printHeader(app: MeshVaultApp): void {
 function printHelp(): void {
   console.log('Available Commands:');
   console.log('  node-id                                      Display current node ID');
+  console.log('  sync-status                                  Display synchronization status');
+  console.log('  sync <peer_url>                              Synchronize with a peer');
   console.log('  records [entity_type]                        Display local records');
   console.log('  operations                                   Display all logged operations');
   console.log('  operation <operation_id>                     Display full details of an operation');
@@ -47,42 +55,100 @@ function printHelp(): void {
   console.log('  exit / quit                                  Exit MeshVault CLI');
 }
 
+function readNextToken(input: string, startIndex = 0): { token: string; endIndex: number } {
+  let index = startIndex;
+
+  while (index < input.length && /\s/.test(input[index])) {
+    index += 1;
+  }
+
+  let token = '';
+  let quoteChar: string | null = null;
+
+  while (index < input.length) {
+    const char = input[index];
+
+    if (quoteChar) {
+      if (char === '\\' && index + 1 < input.length) {
+        token += input[index + 1];
+        index += 2;
+        continue;
+      }
+
+      if (char === quoteChar) {
+        quoteChar = null;
+        index += 1;
+        continue;
+      }
+
+      token += char;
+      index += 1;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quoteChar = char;
+      index += 1;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      break;
+    }
+
+    token += char;
+    index += 1;
+  }
+
+  return { token, endIndex: index };
+}
+
 export function parseCommandLine(line: string): string[] {
   const trimmed = line.trim();
   if (!trimmed) return [];
 
-  const firstSpaceIdx = trimmed.search(/\s/);
-  if (firstSpaceIdx === -1) {
-    return [trimmed];
-  }
-
-  const command = trimmed.substring(0, firstSpaceIdx).trim();
-  const rest = trimmed.substring(firstSpaceIdx).trim();
+  const commandToken = readNextToken(trimmed);
+  const command = commandToken.token;
+  const rest = trimmed.slice(commandToken.endIndex).trim();
 
   if (command.toLowerCase() === 'create' || command.toLowerCase() === 'update') {
-    const parts = rest.split(/\s+/);
-    if (parts.length >= 2) {
-      const entityType = parts[0];
-      const entityId = parts[1];
-      const entityIdPos = rest.indexOf(entityId);
-      let payload = rest.substring(entityIdPos + entityId.length).trim();
-      if (
-        (payload.startsWith("'") && payload.endsWith("'")) ||
-        (payload.startsWith('"') && payload.endsWith('"'))
-      ) {
+    if (!rest) return [command];
+
+    const entityTypeToken = readNextToken(rest);
+    const entityType = entityTypeToken.token;
+    const afterEntityType = rest.slice(entityTypeToken.endIndex).trim();
+
+    if (!entityType || !afterEntityType) {
+      return [command, entityType].filter(Boolean);
+    }
+
+    const entityIdToken = readNextToken(afterEntityType);
+    const entityId = entityIdToken.token;
+    let payload = afterEntityType.slice(entityIdToken.endIndex).trim();
+
+    if (payload.length >= 2) {
+      const firstChar = payload[0];
+      const lastChar = payload[payload.length - 1];
+      if ((firstChar === '"' && lastChar === '"') || (firstChar === "'" && lastChar === "'")) {
         payload = payload.slice(1, -1);
       }
-      return [command, entityType, entityId, payload];
     }
+
+    return [command, entityType, entityId, payload].filter((part) => part !== undefined && part !== '');
   }
 
-  // Token parser preserving quotes for other commands
-  const regex = /[^\s"']+|"([^"]*)"|'([^']*)'/g;
   const args: string[] = [];
-  let match: RegExpExecArray | null;
-  while ((match = regex.exec(trimmed)) !== null) {
-    args.push(match[1] ?? match[2] ?? match[0]);
+  let cursor = 0;
+
+  while (cursor < trimmed.length) {
+    const nextToken = readNextToken(trimmed, cursor);
+    if (!nextToken.token) {
+      break;
+    }
+    args.push(nextToken.token);
+    cursor = nextToken.endIndex;
   }
+
   return args;
 }
 
@@ -97,7 +163,7 @@ function cleanPayload(rawPayload: string): string {
   return cleaned;
 }
 
-export function executeCommand(app: MeshVaultApp, args: string[]): boolean {
+export async function executeCommand(app: MeshVaultApp, args: string[]): Promise<boolean> {
   if (args.length === 0) return true;
 
   const command = args[0].toLowerCase();
@@ -107,6 +173,64 @@ export function executeCommand(app: MeshVaultApp, args: string[]): boolean {
       case 'node-id':
       case 'node': {
         console.log(`Node ID: ${app.nodeConfig.getNodeId()}`);
+        break;
+      }
+
+      case 'sync-status': {
+        if (args.length !== 1) {
+          console.error('Usage: sync-status');
+          return true;
+        }
+        const status = app.syncManager.getSyncStatus();
+        console.log(`Node ID: ${status.nodeId}`);
+        console.log('Sequences:');
+        const origins = Object.entries(status.sequences);
+        if (origins.length === 0) {
+          console.log('  (none)');
+        } else {
+          for (const [nodeId, sequence] of origins) {
+            console.log(`  ${nodeId}: ${sequence}`);
+          }
+        }
+        break;
+      }
+
+      case 'sync': {
+        if (args.length !== 2 || !args[1]) {
+          console.error('Usage: sync <peer_url>');
+          return true;
+        }
+
+        let peerUrl: URL;
+        try {
+          peerUrl = new URL(args[1]);
+          if (peerUrl.protocol !== 'http:' && peerUrl.protocol !== 'https:') {
+            throw new Error('unsupported protocol');
+          }
+        } catch {
+          console.error(`Invalid peer URL: ${args[1]}`);
+          return true;
+        }
+
+        console.log(`Synchronizing with peer: ${peerUrl.toString()}`);
+        try {
+          const result = await app.syncManager.syncWithPeer(peerUrl.toString());
+          console.log(
+            `Operations pulled: ${result.pulled.results.length} ` +
+              `(applied: ${result.pulled.summary.applied}, ` +
+              `duplicates: ${result.pulled.summary.duplicates}, ` +
+              `rejected: ${result.pulled.summary.rejected})`
+          );
+          console.log(
+            `Operations pushed: ${result.pushed.results.length} ` +
+              `(applied: ${result.pushed.summary.applied}, ` +
+              `duplicates: ${result.pushed.summary.duplicates}, ` +
+              `rejected: ${result.pushed.summary.rejected})`
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(`Synchronization failed: ${message}`);
+        }
         break;
       }
 
@@ -363,8 +487,25 @@ export function executeCommand(app: MeshVaultApp, args: string[]): boolean {
   }
 }
 
-export function startRepl(app: MeshVaultApp): void {
+async function startSyncServer(app: MeshVaultApp): Promise<number> {
+  const configuredPort = Number.parseInt(process.env.MESHVAULT_SYNC_PORT ?? '3000', 10);
+  const port = Number.isSafeInteger(configuredPort) && configuredPort >= 0 ? configuredPort : 3000;
+  const host = process.env.MESHVAULT_SYNC_HOST ?? '127.0.0.1';
+  return app.syncServer.start(port, host);
+}
+
+export async function startRepl(app: MeshVaultApp): Promise<void> {
+  let syncPort: number;
+  try {
+    syncPort = await startSyncServer(app);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Unable to start sync server: ${message}`);
+    app.db.close();
+    return;
+  }
   printHeader(app);
+  console.log(`Sync server: http://127.0.0.1:${syncPort}`);
   printHelp();
   console.log('\nEnter a command:');
 
@@ -376,7 +517,7 @@ export function startRepl(app: MeshVaultApp): void {
 
   rl.prompt();
 
-  rl.on('line', (line: string) => {
+  rl.on('line', async (line: string) => {
     const trimmed = line.trim();
     if (trimmed) {
       const args = parseCommandLine(trimmed);
@@ -386,13 +527,14 @@ export function startRepl(app: MeshVaultApp): void {
         return;
       }
 
-      executeCommand(app, args);
+      await executeCommand(app, args);
     }
     rl.prompt();
   });
 
-  rl.on('close', () => {
+  rl.on('close', async () => {
     console.log('\nExiting MeshVault node...');
+    await app.syncServer.stop();
     app.db.close();
     process.exit(0);
   });
@@ -404,10 +546,25 @@ if (process.argv[1] && (process.argv[1].endsWith('index.ts') || process.argv[1].
   const app = initMeshVault();
 
   if (cliArgs.length > 0) {
-    printHeader(app);
-    executeCommand(app, cliArgs);
-    app.db.close();
+    void (async () => {
+      try {
+        if (cliArgs[0].toLowerCase() === 'sync') {
+          const syncPort = await startSyncServer(app);
+          printHeader(app);
+          console.log(`Sync server: http://127.0.0.1:${syncPort}`);
+        } else {
+          printHeader(app);
+        }
+        await executeCommand(app, cliArgs);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`Unable to start MeshVault CLI: ${message}`);
+      } finally {
+        await app.syncServer.stop();
+        app.db.close();
+      }
+    })();
   } else {
-    startRepl(app);
+    void startRepl(app);
   }
 }
