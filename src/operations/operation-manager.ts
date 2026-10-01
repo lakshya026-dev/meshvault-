@@ -70,6 +70,19 @@ export class OperationManager {
     return this.getCurrentSequenceNumber(nodeId) + 1;
   }
 
+  public getSequenceVector(): Record<string, number> {
+    const rawDb = this.dbManager.getRawDb();
+    const rows = rawDb
+      .prepare(
+        'SELECT node_id, MAX(sequence_number) AS max_sequence_number FROM operations GROUP BY node_id'
+      )
+      .all() as { node_id: string; max_sequence_number: number }[];
+
+    return Object.fromEntries(
+      rows.map((row) => [row.node_id, Number(row.max_sequence_number)])
+    );
+  }
+
   public createOperation<T extends Record<string, unknown> = Record<string, unknown>>(
     input: CreateOperationInput<T>
   ): Operation<T> {
