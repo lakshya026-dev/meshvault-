@@ -254,4 +254,150 @@ describe('OperationManager', () => {
     db.close();
     cleanupTestFile(dbPath);
   });
+
+  it('guarantees transaction atomicity: rolls back operation if state application fails', () => {
+    const dbPath = getUniqueTestDbPath('op_atomicity');
+    const { db, opManager } = createTestNode(dbPath);
+
+    // Initial state: 0 operations, 0 records
+    assert.strictEqual(opManager.getAllOperations().length, 0);
+    assert.strictEqual(opManager.getAllRecords().length, 0);
+
+    // Attempt an invalid UPDATE on non-existent entity
+    assert.throws(() => {
+      opManager.createOperation({
+        operationType: 'UPDATE',
+        entityType: 'task',
+        entityId: 'non-existent',
+        payload: { title: 'Fail' },
+      });
+    });
+
+    // Verify: neither operation log nor records were modified
+    assert.strictEqual(opManager.getAllOperations().length, 0);
+    assert.strictEqual(opManager.getAllRecords().length, 0);
+    assert.strictEqual(opManager.getCurrentSequenceNumber(), 0);
+
+    // Create a valid record
+    opManager.createOperation({
+      operationType: 'CREATE',
+      entityType: 'task',
+      entityId: 'task-atomic',
+      payload: { count: 1 },
+    });
+    assert.strictEqual(opManager.getAllOperations().length, 1);
+    assert.strictEqual(opManager.getAllRecords().length, 1);
+
+    // Attempt a second CREATE with same ID (will fail with EntityAlreadyExistsError)
+    assert.throws(() => {
+      opManager.createOperation({
+        operationType: 'CREATE',
+        entityType: 'task',
+        entityId: 'task-atomic',
+        payload: { count: 2 },
+      });
+    });
+
+    // Verify: operations count is STILL 1, sequence number is STILL 1
+    assert.strictEqual(opManager.getAllOperations().length, 1);
+    assert.strictEqual(opManager.getCurrentSequenceNumber(), 1);
+    const rec = opManager.getRecord('task-atomic');
+    assert.deepStrictEqual(rec?.data, { count: 1 });
+
+    db.close();
+    cleanupTestFile(dbPath);
+  });
+
+  it('guarantees idempotency across UPDATE and DELETE operations', () => {
+    const dbPath = getUniqueTestDbPath('op_idemp_all');
+    const { db, opManager } = createTestNode(dbPath);
+
+    // 1. Create task
+    opManager.createOperation({
+      operationType: 'CREATE',
+      entityType: 'task',
+      entityId: 'task-multi-idemp',
+      payload: { status: 'initial' },
+    });
+
+    // 2. Update task
+    const updateOp = opManager.createOperation({
+      operationType: 'UPDATE',
+      entityType: 'task',
+      entityId: 'task-multi-idemp',
+      payload: { status: 'updated' },
+    });
+
+    const recordBefore = opManager.getRecord('task-multi-idemp');
+    assert.strictEqual(recordBefore?.data.status, 'updated');
+
+    // Re-apply the update operation directly
+    opManager.applyOperation(updateOp);
+
+    const recordAfter = opManager.getRecord('task-multi-idemp');
+    assert.deepStrictEqual(recordAfter, recordBefore);
+
+    // 3. Delete task
+    const deleteOp = opManager.createOperation({
+      operationType: 'DELETE',
+      entityType: 'task',
+      entityId: 'task-multi-idemp',
+      payload: {},
+    });
+
+    assert.strictEqual(opManager.getRecord('task-multi-idemp'), null);
+
+    // Re-apply the delete operation directly
+    assert.doesNotThrow(() => {
+      opManager.applyOperation(deleteOp);
+    });
+
+    assert.strictEqual(opManager.getRecord('task-multi-idemp'), null);
+
+    db.close();
+    cleanupTestFile(dbPath);
+  });
+
+  it('records standalone applied operations in operation log and enforces idempotency', () => {
+    const dbPath = getUniqueTestDbPath('op_standalone');
+    const { db, opManager } = createTestNode(dbPath);
+
+    // Create a standalone operation that was NOT generated via createOperation
+    const standaloneOp = {
+      operationId: 'op-standalone-001',
+      nodeId: 'node-A',
+      sequenceNumber: 1,
+      operationType: 'CREATE' as const,
+      entityType: 'task',
+      entityId: 'task-standalone',
+      payload: { title: 'External / Synced Op' },
+      status: 'PENDING' as const,
+      createdAt: new Date().toISOString(),
+      appliedAt: null,
+    };
+
+    // Apply standalone operation
+    opManager.applyOperation(standaloneOp);
+
+    // Verify: recorded in operations table AND records table
+    const storedOp = opManager.getOperation('op-standalone-001');
+    assert.ok(storedOp, 'Standalone operation must be stored in log');
+    assert.ok(storedOp.appliedAt, 'appliedAt timestamp must be set');
+
+    const storedRec = opManager.getRecord('task-standalone');
+    assert.ok(storedRec, 'Record must exist in records table');
+    assert.deepStrictEqual(storedRec.data, { title: 'External / Synced Op' });
+
+    // Apply a second time (idempotency)
+    assert.doesNotThrow(() => {
+      opManager.applyOperation(standaloneOp);
+    });
+
+    // Verify operations table still has only 1 entry
+    assert.strictEqual(opManager.getAllOperations().length, 1);
+    assert.strictEqual(opManager.getAllRecords().length, 1);
+
+    db.close();
+    cleanupTestFile(dbPath);
+  });
 });

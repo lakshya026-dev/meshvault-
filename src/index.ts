@@ -43,6 +43,56 @@ function printHelp(): void {
   console.log('  exit / quit                                  Exit MeshVault CLI');
 }
 
+export function parseCommandLine(line: string): string[] {
+  const trimmed = line.trim();
+  if (!trimmed) return [];
+
+  const firstSpaceIdx = trimmed.search(/\s/);
+  if (firstSpaceIdx === -1) {
+    return [trimmed];
+  }
+
+  const command = trimmed.substring(0, firstSpaceIdx).trim();
+  const rest = trimmed.substring(firstSpaceIdx).trim();
+
+  if (command.toLowerCase() === 'create' || command.toLowerCase() === 'update') {
+    const parts = rest.split(/\s+/);
+    if (parts.length >= 2) {
+      const entityType = parts[0];
+      const entityId = parts[1];
+      const entityIdPos = rest.indexOf(entityId);
+      let payload = rest.substring(entityIdPos + entityId.length).trim();
+      if (
+        (payload.startsWith("'") && payload.endsWith("'")) ||
+        (payload.startsWith('"') && payload.endsWith('"'))
+      ) {
+        payload = payload.slice(1, -1);
+      }
+      return [command, entityType, entityId, payload];
+    }
+  }
+
+  // Token parser preserving quotes for other commands
+  const regex = /[^\s"']+|"([^"]*)"|'([^']*)'/g;
+  const args: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(trimmed)) !== null) {
+    args.push(match[1] ?? match[2] ?? match[0]);
+  }
+  return args;
+}
+
+function cleanPayload(rawPayload: string): string {
+  let cleaned = rawPayload.trim();
+  if (
+    (cleaned.startsWith("'") && cleaned.endsWith("'")) ||
+    (cleaned.startsWith('"') && cleaned.endsWith('"'))
+  ) {
+    cleaned = cleaned.slice(1, -1);
+  }
+  return cleaned;
+}
+
 export function executeCommand(app: MeshVaultApp, args: string[]): boolean {
   if (args.length === 0) return true;
 
@@ -106,7 +156,7 @@ export function executeCommand(app: MeshVaultApp, args: string[]): boolean {
       case 'create': {
         const entityType = args[1];
         const entityId = args[2];
-        const payloadStr = args.slice(3).join(' ');
+        const rawPayloadStr = args.slice(3).join(' ');
 
         if (!entityType || !entityId) {
           console.error('Usage: create <entity_type> <entity_id> <json_payload>');
@@ -114,7 +164,8 @@ export function executeCommand(app: MeshVaultApp, args: string[]): boolean {
         }
 
         let payload: Record<string, unknown> = {};
-        if (payloadStr) {
+        if (rawPayloadStr) {
+          const payloadStr = cleanPayload(rawPayloadStr);
           try {
             payload = JSON.parse(payloadStr);
           } catch {
@@ -142,13 +193,14 @@ export function executeCommand(app: MeshVaultApp, args: string[]): boolean {
       case 'update': {
         const entityType = args[1];
         const entityId = args[2];
-        const payloadStr = args.slice(3).join(' ');
+        const rawPayloadStr = args.slice(3).join(' ');
 
-        if (!entityType || !entityId || !payloadStr) {
+        if (!entityType || !entityId || !rawPayloadStr) {
           console.error('Usage: update <entity_type> <entity_id> <json_payload>');
           return false;
         }
 
+        const payloadStr = cleanPayload(rawPayloadStr);
         let payload: Record<string, unknown>;
         try {
           payload = JSON.parse(payloadStr);
@@ -242,13 +294,7 @@ export function startRepl(app: MeshVaultApp): void {
   rl.on('line', (line: string) => {
     const trimmed = line.trim();
     if (trimmed) {
-      // Split preserving quoted arguments
-      const regex = /[^\s"']+|"([^"]*)"|'([^']*)'/g;
-      const args: string[] = [];
-      let match: RegExpExecArray | null;
-      while ((match = regex.exec(trimmed)) !== null) {
-        args.push(match[1] ?? match[2] ?? match[0]);
-      }
+      const args = parseCommandLine(trimmed);
 
       if (args[0] === 'exit' || args[0] === 'quit') {
         rl.close();

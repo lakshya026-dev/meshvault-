@@ -154,8 +154,31 @@ export class OperationManager {
         .get(operation.operationId) as unknown) as { applied_at: string | null } | undefined;
 
       if (opRow && opRow.applied_at) {
-        // Operation has already been applied locally; do not re-apply to avoid redundant state mutation
+        // Operation has already been applied locally; deterministic no-op
         return;
+      }
+
+      if (!opRow) {
+        // Ensure operation is stored in operations table if applyOperation is called standalone
+        rawDb
+          .prepare(
+            `INSERT INTO operations (
+              operation_id, node_id, sequence_number, operation_type,
+              entity_type, entity_id, payload, status, created_at, applied_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            operation.operationId,
+            operation.nodeId,
+            operation.sequenceNumber,
+            operation.operationType,
+            operation.entityType,
+            operation.entityId,
+            JSON.stringify(operation.payload),
+            operation.status,
+            operation.createdAt,
+            null
+          );
       }
 
       const existingRecord = this.getRecord(operation.entityId);
