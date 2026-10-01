@@ -35,7 +35,11 @@ function printHelp(): void {
   console.log('  node-id                                      Display current node ID');
   console.log('  records [entity_type]                        Display local records');
   console.log('  operations                                   Display all logged operations');
+  console.log('  operation <operation_id>                     Display full details of an operation');
   console.log('  pending                                      Display pending operations');
+  console.log('  applied                                      Display applied operations');
+  console.log('  failed                                       Display failed operations');
+  console.log('  verify <operation_id>                        Verify cryptographic checksum of an operation');
   console.log('  create <type> <id> <json_payload>            Create a new record');
   console.log('  update <type> <id> <json_payload>            Update an existing record');
   console.log('  delete <type> <id>                           Delete an existing record');
@@ -132,7 +136,37 @@ export function executeCommand(app: MeshVaultApp, args: string[]): boolean {
             console.log(
               `  Seq #${op.sequenceNumber} [${op.operationType}] ID: ${op.operationId} | Entity: ${op.entityType}/${op.entityId} | Status: ${op.status}`
             );
-            console.log(`    Payload: ${JSON.stringify(op.payload)}`);
+            console.log(`    Checksum: ${op.checksum.slice(0, 16)}...`);
+            console.log(`    Payload:  ${JSON.stringify(op.payload)}`);
+          }
+        }
+        break;
+      }
+
+      case 'operation': {
+        const operationId = args[1];
+        if (!operationId) {
+          console.error('Usage: operation <operation_id>');
+          return false;
+        }
+
+        const op = app.opManager.getOperation(operationId);
+        if (!op) {
+          console.log(`Operation '${operationId}' not found.`);
+        } else {
+          console.log(`Operation Details:`);
+          console.log(`  ID:              ${op.operationId}`);
+          console.log(`  Node ID:         ${op.nodeId}`);
+          console.log(`  Sequence:        ${op.sequenceNumber}`);
+          console.log(`  Type:            ${op.operationType}`);
+          console.log(`  Entity:          ${op.entityType} / ${op.entityId}`);
+          console.log(`  Status:          ${op.status}`);
+          console.log(`  Created At:      ${op.createdAt}`);
+          console.log(`  Applied At:      ${op.appliedAt ?? 'none'}`);
+          console.log(`  Checksum:        ${op.checksum}`);
+          console.log(`  Payload:         ${JSON.stringify(op.payload, null, 2)}`);
+          if (op.errorMessage) {
+            console.log(`  Error:           ${op.errorMessage}`);
           }
         }
         break;
@@ -149,6 +183,54 @@ export function executeCommand(app: MeshVaultApp, args: string[]): boolean {
               `  Seq #${op.sequenceNumber} [${op.operationType}] ID: ${op.operationId} | Entity: ${op.entityType}/${op.entityId}`
             );
           }
+        }
+        break;
+      }
+
+      case 'applied': {
+        const applied = app.opManager.getAppliedOperations();
+        if (applied.length === 0) {
+          console.log('(no applied operations)');
+        } else {
+          console.log(`Applied Operations (${applied.length}):`);
+          for (const op of applied) {
+            console.log(
+              `  Seq #${op.sequenceNumber} [${op.operationType}] ID: ${op.operationId} | Applied: ${op.appliedAt}`
+            );
+          }
+        }
+        break;
+      }
+
+      case 'failed': {
+        const failed = app.opManager.getFailedOperations();
+        if (failed.length === 0) {
+          console.log('(no failed operations)');
+        } else {
+          console.log(`Failed Operations (${failed.length}):`);
+          for (const op of failed) {
+            console.log(
+              `  Seq #${op.sequenceNumber} [${op.operationType}] ID: ${op.operationId} | Error: ${op.errorMessage}`
+            );
+          }
+        }
+        break;
+      }
+
+      case 'verify': {
+        const operationId = args[1];
+        if (!operationId) {
+          console.error('Usage: verify <operation_id>');
+          return false;
+        }
+
+        const verification = app.opManager.verifyOperation(operationId);
+        if (verification.valid) {
+          console.log(`[PASS] Operation '${operationId}' integrity verified.`);
+          console.log(`  SHA-256 Checksum: ${verification.checksum}`);
+        } else {
+          console.log(`[FAIL] Operation '${operationId}' integrity verification failed!`);
+          console.log(`  Reason: ${verification.error}`);
         }
         break;
       }
@@ -187,6 +269,7 @@ export function executeCommand(app: MeshVaultApp, args: string[]): boolean {
         console.log(`Type:     ${op.operationType}`);
         console.log(`Entity:   ${op.entityId}`);
         console.log(`Status:   ${op.status}`);
+        console.log(`Checksum: ${op.checksum.slice(0, 16)}...`);
         break;
       }
 
@@ -222,6 +305,7 @@ export function executeCommand(app: MeshVaultApp, args: string[]): boolean {
         console.log(`Type:     ${op.operationType}`);
         console.log(`Entity:   ${op.entityId}`);
         console.log(`Status:   ${op.status}`);
+        console.log(`Checksum: ${op.checksum.slice(0, 16)}...`);
         break;
       }
 
@@ -247,6 +331,7 @@ export function executeCommand(app: MeshVaultApp, args: string[]): boolean {
         console.log(`Type:     ${op.operationType}`);
         console.log(`Entity:   ${op.entityId}`);
         console.log(`Status:   ${op.status}`);
+        console.log(`Checksum: ${op.checksum.slice(0, 16)}...`);
         break;
       }
 

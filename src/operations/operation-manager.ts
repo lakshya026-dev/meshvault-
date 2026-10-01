@@ -6,13 +6,17 @@ import {
   CreateOperationInput,
   RecordEntity,
   OperationType,
+  OperationStatus,
 } from './types.js';
 import {
   InvalidOperationError,
   EntityNotFoundError,
   EntityAlreadyExistsError,
   DuplicateOperationError,
+  OperationIntegrityError,
 } from '../errors.js';
+import { OperationValidator } from './validator.js';
+import { computeOperationChecksum, verifyOperationIntegrity } from './integrity.js';
 
 interface RawOperationRow {
   operation_id: string;
@@ -25,6 +29,8 @@ interface RawOperationRow {
   status: string;
   created_at: string;
   applied_at: string | null;
+  checksum: string;
+  error_message: string | null;
 }
 
 interface RawRecordRow {
@@ -48,25 +54,26 @@ export class OperationManager {
     return this.nodeConfig.getNodeId();
   }
 
-  public getCurrentSequenceNumber(): number {
+  public getCurrentSequenceNumber(nodeId?: string): number {
     const rawDb = this.dbManager.getRawDb();
+    const targetNodeId = nodeId ?? this.getNodeId();
     const result = (rawDb
       .prepare(
         'SELECT COALESCE(MAX(sequence_number), 0) AS max_seq FROM operations WHERE node_id = ?'
       )
-      .get(this.getNodeId()) as unknown) as { max_seq: number } | undefined;
+      .get(targetNodeId) as unknown) as { max_seq: number } | undefined;
 
     return result ? Number(result.max_seq) : 0;
   }
 
-  public getNextSequenceNumber(): number {
-    return this.getCurrentSequenceNumber() + 1;
+  public getNextSequenceNumber(nodeId?: string): number {
+    return this.getCurrentSequenceNumber(nodeId) + 1;
   }
 
   public createOperation<T extends Record<string, unknown> = Record<string, unknown>>(
     input: CreateOperationInput<T>
   ): Operation<T> {
-    this.validateOperationInput(input);
+    OperationValidator.validateCreateInput(input);
 
     return this.dbManager.transaction(() => {
       const rawDb = this.dbManager.getRawDb();
@@ -94,11 +101,23 @@ export class OperationManager {
       }
 
       const nodeId = this.getNodeId();
-      const sequenceNumber = this.getNextSequenceNumber();
+      const sequenceNumber = this.getNextSequenceNumber(nodeId);
       const operationId =
         input.operationId ??
         `op-${String(sequenceNumber).padStart(3, '0')}-${randomUUID().slice(0, 6)}`;
       const createdAt = new Date().toISOString();
+
+      // Compute deterministic SHA-256 integrity checksum
+      const checksum = computeOperationChecksum({
+        operationId,
+        nodeId,
+        sequenceNumber,
+        operationType: input.operationType,
+        entityType: input.entityType,
+        entityId: input.entityId,
+        payload: input.payload,
+        createdAt,
+      });
 
       const operation: Operation<T> = {
         operationId,
@@ -111,15 +130,20 @@ export class OperationManager {
         status: 'PENDING',
         createdAt,
         appliedAt: null,
+        checksum,
+        errorMessage: null,
       };
 
-      // 1. Store operation in SQLite operations table
+      // Validate the constructed operation
+      OperationValidator.validateOperation(operation);
+
+      // 1. Store operation in SQLite operations table with status 'PENDING'
       rawDb
         .prepare(
           `INSERT INTO operations (
             operation_id, node_id, sequence_number, operation_type,
-            entity_type, entity_id, payload, status, created_at, applied_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            entity_type, entity_id, payload, status, created_at, applied_at, checksum, error_message
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           operation.operationId,
@@ -131,41 +155,70 @@ export class OperationManager {
           JSON.stringify(operation.payload),
           operation.status,
           operation.createdAt,
+          null,
+          operation.checksum,
           null
         );
 
-      // 2. Apply operation to local state
-      this.applyOperation(operation);
-
-      return operation;
+      // 2. Apply operation to local state and transition PENDING -> APPLIED
+      return this.applyOperation(operation);
     });
   }
 
   public applyOperation<T extends Record<string, unknown> = Record<string, unknown>>(
     operation: Operation<T>
-  ): void {
+  ): Operation<T> {
+    OperationValidator.validateOperation(operation);
+
+    // Verify operation integrity before touching state
+    if (!verifyOperationIntegrity(operation)) {
+      throw new OperationIntegrityError(
+        `Operation '${operation.operationId}' failed integrity verification. Checksum mismatch.`
+      );
+    }
+
     const rawDb = this.dbManager.getRawDb();
     const now = new Date().toISOString();
 
-    this.dbManager.transaction(() => {
-      // Check if already applied to ensure local idempotency
-      const opRow = (rawDb
-        .prepare('SELECT applied_at FROM operations WHERE operation_id = ?')
-        .get(operation.operationId) as unknown) as { applied_at: string | null } | undefined;
+    return this.dbManager.transaction(() => {
+      // Check if operation is already recorded in the operations log
+      const existingOpRow = (rawDb
+        .prepare('SELECT * FROM operations WHERE operation_id = ?')
+        .get(operation.operationId) as unknown) as RawOperationRow | undefined;
 
-      if (opRow && opRow.applied_at) {
-        // Operation has already been applied locally; deterministic no-op
-        return;
-      }
+      if (existingOpRow) {
+        // Reject if existing operation has a different checksum (tampering / conflict)
+        if (existingOpRow.checksum !== operation.checksum) {
+          throw new OperationIntegrityError(
+            `Operation with ID '${operation.operationId}' already exists in the log with a different checksum. Stored: ${existingOpRow.checksum}, Incoming: ${operation.checksum}`
+          );
+        }
 
-      if (!opRow) {
-        // Ensure operation is stored in operations table if applyOperation is called standalone
+        // Case: Operation exists and is already APPLIED -> Deterministic no-op
+        if (existingOpRow.status === 'APPLIED') {
+          return this.mapRowToOperation<T>(existingOpRow);
+        }
+
+        // Case: Operation exists as PENDING or FAILED (retry) -> Proceed to apply
+      } else {
+        // Verify sequence number uniqueness per node
+        const existingSeq = (rawDb
+          .prepare('SELECT operation_id FROM operations WHERE node_id = ? AND sequence_number = ?')
+          .get(operation.nodeId, operation.sequenceNumber) as unknown) as { operation_id: string } | undefined;
+
+        if (existingSeq && existingSeq.operation_id !== operation.operationId) {
+          throw new InvalidOperationError(
+            `Sequence number ${operation.sequenceNumber} is already assigned to operation '${existingSeq.operation_id}' on node '${operation.nodeId}'.`
+          );
+        }
+
+        // Operation not yet logged: insert as PENDING first
         rawDb
           .prepare(
             `INSERT INTO operations (
               operation_id, node_id, sequence_number, operation_type,
-              entity_type, entity_id, payload, status, created_at, applied_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+              entity_type, entity_id, payload, status, created_at, applied_at, checksum, error_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           )
           .run(
             operation.operationId,
@@ -175,12 +228,15 @@ export class OperationManager {
             operation.entityType,
             operation.entityId,
             JSON.stringify(operation.payload),
-            operation.status,
+            'PENDING',
             operation.createdAt,
+            null,
+            operation.checksum,
             null
           );
       }
 
+      // Apply changes to records table
       const existingRecord = this.getRecord(operation.entityId);
 
       switch (operation.operationType) {
@@ -235,11 +291,20 @@ export class OperationManager {
           );
       }
 
-      // Durably mark operation as applied locally
+      // Transition operation status: PENDING -> APPLIED
       rawDb
-        .prepare('UPDATE operations SET applied_at = ? WHERE operation_id = ?')
+        .prepare(
+          `UPDATE operations
+           SET status = 'APPLIED', applied_at = ?, error_message = NULL
+           WHERE operation_id = ?`
+        )
         .run(now, operation.operationId);
+
+      operation.status = 'APPLIED';
       operation.appliedAt = now;
+      operation.errorMessage = null;
+
+      return operation;
     });
   }
 
@@ -252,13 +317,63 @@ export class OperationManager {
     return row ? this.mapRowToOperation(row) : null;
   }
 
-  public getPendingOperations(): Operation[] {
+  public getOperationBySequence(nodeId: string, sequenceNumber: number): Operation | null {
+    const rawDb = this.dbManager.getRawDb();
+    const row = (rawDb
+      .prepare('SELECT * FROM operations WHERE node_id = ? AND sequence_number = ?')
+      .get(nodeId, sequenceNumber) as unknown) as RawOperationRow | undefined;
+
+    return row ? this.mapRowToOperation(row) : null;
+  }
+
+  public getOperationsByNode(nodeId: string): Operation[] {
+    const rawDb = this.dbManager.getRawDb();
+    const rows = (rawDb
+      .prepare('SELECT * FROM operations WHERE node_id = ? ORDER BY sequence_number ASC')
+      .all(nodeId) as unknown) as RawOperationRow[];
+
+    return rows.map((r) => this.mapRowToOperation(r));
+  }
+
+  public getOperationsByStatus(status: OperationStatus): Operation[] {
+    const rawDb = this.dbManager.getRawDb();
+    const rows = (rawDb
+      .prepare('SELECT * FROM operations WHERE status = ? ORDER BY created_at ASC, sequence_number ASC')
+      .all(status) as unknown) as RawOperationRow[];
+
+    return rows.map((r) => this.mapRowToOperation(r));
+  }
+
+  public getOperationsByEntity(entityType: string, entityId: string): Operation[] {
     const rawDb = this.dbManager.getRawDb();
     const rows = (rawDb
       .prepare(
-        'SELECT * FROM operations WHERE status = ? ORDER BY sequence_number ASC'
+        'SELECT * FROM operations WHERE entity_type = ? AND entity_id = ? ORDER BY sequence_number ASC'
       )
-      .all('PENDING') as unknown) as RawOperationRow[];
+      .all(entityType, entityId) as unknown) as RawOperationRow[];
+
+    return rows.map((r) => this.mapRowToOperation(r));
+  }
+
+  public getPendingOperations(): Operation[] {
+    return this.getOperationsByStatus('PENDING');
+  }
+
+  public getAppliedOperations(): Operation[] {
+    return this.getOperationsByStatus('APPLIED');
+  }
+
+  public getFailedOperations(): Operation[] {
+    return this.getOperationsByStatus('FAILED');
+  }
+
+  public getOperationsAfterSequence(nodeId: string, sequenceNumber: number): Operation[] {
+    const rawDb = this.dbManager.getRawDb();
+    const rows = (rawDb
+      .prepare(
+        'SELECT * FROM operations WHERE node_id = ? AND sequence_number > ? ORDER BY sequence_number ASC'
+      )
+      .all(nodeId, sequenceNumber) as unknown) as RawOperationRow[];
 
     return rows.map((r) => this.mapRowToOperation(r));
   }
@@ -270,6 +385,20 @@ export class OperationManager {
       .all() as unknown) as RawOperationRow[];
 
     return rows.map((r) => this.mapRowToOperation(r));
+  }
+
+  public verifyOperation(operationId: string): { valid: boolean; checksum: string; error?: string } {
+    const op = this.getOperation(operationId);
+    if (!op) {
+      return { valid: false, checksum: '', error: `Operation '${operationId}' not found.` };
+    }
+
+    const isValid = verifyOperationIntegrity(op);
+    return {
+      valid: isValid,
+      checksum: op.checksum,
+      error: isValid ? undefined : 'Checksum does not match canonical operation content.',
+    };
   }
 
   public getRecord<T extends Record<string, unknown> = Record<string, unknown>>(
@@ -302,31 +431,6 @@ export class OperationManager {
     return rows.map((r) => this.mapRowToRecord<T>(r));
   }
 
-  private validateOperationInput(input: CreateOperationInput): void {
-    const validTypes: OperationType[] = ['CREATE', 'UPDATE', 'DELETE'];
-    if (!validTypes.includes(input.operationType)) {
-      throw new InvalidOperationError(
-        `Invalid operation type: '${input.operationType}'. Expected CREATE, UPDATE, or DELETE.`
-      );
-    }
-
-    if (!input.entityType || typeof input.entityType !== 'string' || input.entityType.trim() === '') {
-      throw new InvalidOperationError('Entity type must be a non-empty string.');
-    }
-
-    if (!input.entityId || typeof input.entityId !== 'string' || input.entityId.trim() === '') {
-      throw new InvalidOperationError('Entity ID must be a non-empty string.');
-    }
-
-    if (
-      input.payload === null ||
-      typeof input.payload !== 'object' ||
-      Array.isArray(input.payload)
-    ) {
-      throw new InvalidOperationError('Payload must be a valid JSON object.');
-    }
-  }
-
   private mapRowToOperation<T = Record<string, unknown>>(
     row: RawOperationRow
   ): Operation<T> {
@@ -338,9 +442,11 @@ export class OperationManager {
       entityType: row.entity_type,
       entityId: row.entity_id,
       payload: JSON.parse(row.payload) as T,
-      status: 'PENDING',
+      status: row.status as OperationStatus,
       createdAt: row.created_at,
       appliedAt: row.applied_at,
+      checksum: row.checksum,
+      errorMessage: row.error_message,
     };
   }
 

@@ -13,6 +13,20 @@ export class InvalidOperationError extends MeshVaultError {
   }
 }
 
+export class OperationIntegrityError extends MeshVaultError {
+  constructor(message: string) {
+    super(`Integrity verification failed: ${message}`);
+    this.name = 'OperationIntegrityError';
+  }
+}
+
+export class InvalidOperationStateError extends MeshVaultError {
+  constructor(message: string) {
+    super(`Invalid operation state: ${message}`);
+    this.name = 'InvalidOperationStateError';
+  }
+}
+
 export class EntityNotFoundError extends MeshVaultError {
   constructor(entityType: string, entityId: string) {
     super(`Entity of type '${entityType}' with ID '${entityId}' was not found.`);

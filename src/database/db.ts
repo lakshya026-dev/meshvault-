@@ -45,6 +45,25 @@ export class DatabaseManager {
 
   private initSchema(): void {
     this.db.exec(INITIAL_SCHEMA);
+    this.migrateSchema();
+  }
+
+  private migrateSchema(): void {
+    try {
+      const columns = (this.db
+        .prepare('PRAGMA table_info(operations)')
+        .all() as unknown) as { name: string }[];
+      const columnNames = new Set(columns.map((c) => c.name));
+
+      if (!columnNames.has('checksum')) {
+        this.db.exec("ALTER TABLE operations ADD COLUMN checksum TEXT NOT NULL DEFAULT '';");
+      }
+      if (!columnNames.has('error_message')) {
+        this.db.exec('ALTER TABLE operations ADD COLUMN error_message TEXT;');
+      }
+    } catch {
+      // Ignore if operations table does not exist yet or alter fails safely
+    }
   }
 
   public getRawDb(): DatabaseSync {

@@ -3,6 +3,7 @@ import * as assert from 'node:assert';
 import { DatabaseManager } from '../src/database/db.js';
 import { NodeConfig } from '../src/config/node.js';
 import { OperationManager } from '../src/operations/operation-manager.js';
+import { computeOperationChecksum } from '../src/operations/integrity.js';
 import { getUniqueTestDbPath, cleanupTestFile } from './test-utils.js';
 
 describe('OperationManager', () => {
@@ -56,8 +57,9 @@ describe('OperationManager', () => {
 
     assert.strictEqual(op.operationType, 'CREATE');
     assert.strictEqual(op.entityId, 'task-001');
-    assert.strictEqual(op.status, 'PENDING');
+    assert.strictEqual(op.status, 'APPLIED');
     assert.strictEqual(op.sequenceNumber, 1);
+    assert.ok(op.checksum);
 
     // Verify local record
     const record = opManager.getRecord('task-001');
@@ -93,7 +95,8 @@ describe('OperationManager', () => {
 
     assert.strictEqual(updateOp.sequenceNumber, 2);
     assert.strictEqual(updateOp.operationType, 'UPDATE');
-    assert.strictEqual(updateOp.status, 'PENDING');
+    assert.strictEqual(updateOp.status, 'APPLIED');
+    assert.ok(updateOp.checksum);
 
     const updatedRecord = opManager.getRecord('task-001');
     assert.ok(updatedRecord);
@@ -127,7 +130,8 @@ describe('OperationManager', () => {
     });
 
     assert.strictEqual(deleteOp.sequenceNumber, 2);
-    assert.strictEqual(deleteOp.status, 'PENDING');
+    assert.strictEqual(deleteOp.status, 'APPLIED');
+    assert.ok(deleteOp.checksum);
 
     // Record should no longer exist
     assert.strictEqual(opManager.getRecord('task-001'), null);
@@ -140,7 +144,7 @@ describe('OperationManager', () => {
     cleanupTestFile(dbPath);
   });
 
-  it('retrieves operations by ID and pending operations', () => {
+  it('retrieves operations by ID and status', () => {
     const dbPath = getUniqueTestDbPath('op_retrieve');
     const { db, opManager } = createTestNode(dbPath);
 
@@ -154,11 +158,14 @@ describe('OperationManager', () => {
     const retrieved = opManager.getOperation(op1.operationId);
     assert.ok(retrieved);
     assert.strictEqual(retrieved.operationId, op1.operationId);
-    assert.strictEqual(retrieved.status, 'PENDING');
+    assert.strictEqual(retrieved.status, 'APPLIED');
+
+    const applied = opManager.getAppliedOperations();
+    assert.strictEqual(applied.length, 1);
+    assert.strictEqual(applied[0].operationId, op1.operationId);
 
     const pending = opManager.getPendingOperations();
-    assert.strictEqual(pending.length, 1);
-    assert.strictEqual(pending[0].operationId, op1.operationId);
+    assert.strictEqual(pending.length, 0);
 
     db.close();
     cleanupTestFile(dbPath);
@@ -363,6 +370,18 @@ describe('OperationManager', () => {
     const { db, opManager } = createTestNode(dbPath);
 
     // Create a standalone operation that was NOT generated via createOperation
+    const createdAt = new Date().toISOString();
+    const checksum = computeOperationChecksum({
+      operationId: 'op-standalone-001',
+      nodeId: 'node-A',
+      sequenceNumber: 1,
+      operationType: 'CREATE',
+      entityType: 'task',
+      entityId: 'task-standalone',
+      payload: { title: 'External / Synced Op' },
+      createdAt,
+    });
+
     const standaloneOp = {
       operationId: 'op-standalone-001',
       nodeId: 'node-A',
@@ -372,8 +391,9 @@ describe('OperationManager', () => {
       entityId: 'task-standalone',
       payload: { title: 'External / Synced Op' },
       status: 'PENDING' as const,
-      createdAt: new Date().toISOString(),
+      createdAt,
       appliedAt: null,
+      checksum,
     };
 
     // Apply standalone operation

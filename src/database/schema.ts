@@ -22,12 +22,16 @@ CREATE TABLE IF NOT EXISTS operations (
   entity_type TEXT NOT NULL,
   entity_id TEXT NOT NULL,
   payload TEXT NOT NULL,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PENDING',
   created_at TEXT NOT NULL,
-  applied_at TEXT
+  applied_at TEXT,
+  checksum TEXT NOT NULL DEFAULT '',
+  error_message TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_operations_node_seq ON operations(node_id, sequence_number);
 CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status);
 CREATE INDEX IF NOT EXISTS idx_operations_entity ON operations(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_operations_node_status ON operations(node_id, status);
+CREATE INDEX IF NOT EXISTS idx_operations_node_seq_range ON operations(node_id, sequence_number ASC);
 `;

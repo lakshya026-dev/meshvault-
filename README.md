@@ -2,59 +2,101 @@
 
 MeshVault is an offline-first distributed synchronization system designed to maintain consistent shared state across intermittently connected devices, edge nodes, and central servers.
 
-> **Important Notice:** Synchronization is intentionally NOT implemented in Phase 1.  
-> Phase 1 focuses strictly on the local standalone node foundation.
+> **Important Boundary Notice:** Network synchronization, remote peers, CRDTs, and conflict resolution are intentionally **NOT** part of Phase 2.  
+> Phase 2 focuses strictly on building a robust, validated, deterministic, offline-first **Operation Engine**.
 
 ---
 
-## Phase 1: Local Node Foundation
+## Phase 2: Operation Engine / Advanced Operation Handling
 
-Phase 1 establishes a robust, durable, and crash-resilient local foundation for a MeshVault node that operates completely offline.
+Phase 2 hardens the standalone local node foundation into a robust, deterministic, cryptographically validated operation engine. Every state mutation is represented as an immutable, tamper-evident operation with explicit lifecycle states, canonical serialization, and deterministic replay semantics.
 
-### What Phase 1 Implements
+---
 
-1. **Persistent Node Identity**: Every MeshVault node has a unique, persistent identifier stored locally in SQLite (`node_info` table). This identifier is generated once and preserved across application restarts.
-2. **Durable Operation Log**: Every state mutation (`CREATE`, `UPDATE`, `DELETE`) is structured as an immutable operation, given a monotonically increasing sequence number, and stored durably in the `operations` table with status `PENDING`.
-3. **Local State Engine**: A local key-value entity store (`records` table) that reflects the state produced by operations.
-4. **Atomic Operation Creation & Application**: Operations are recorded and applied to local state within atomic database transactions, preventing state corruption or phantom operations upon crashes.
-5. **Local Idempotency Protection**: Safe re-application of operations without duplicating or corrupting local state.
-6. **Restart Resilience**: Database state, node identity, operation log, and sequence counters persist intact across restarts.
-7. **Interactive & Command CLI**: A command-line interface for manual verification and demonstration.
+## Key Capabilities Implemented in Phase 2
+
+1. **Strong Operation Validation**:
+   - Dedicated validation layer (`OperationValidator`) enforcing structural, type, and semantic constraints.
+   - Immediate rejection of malformed operations (empty IDs, non-integer or <1 sequence numbers, invalid operation types, malformed payloads, invalid ISO timestamps).
+   - Typed domain errors (`InvalidOperationError`, `EntityNotFoundError`, `EntityAlreadyExistsError`, `DuplicateOperationError`, `OperationIntegrityError`, `InvalidOperationStateError`).
+
+2. **Cryptographic Integrity & SHA-256 Checksums**:
+   - Deterministic SHA-256 checksums computed across canonical operation fields:  
+     `operationId:nodeId:sequenceNumber:operationType:entityType:entityId:canonicalPayload:createdAt`.
+   - Tamper detection: any mutation to payload, entity ID, sequence number, node ID, or timestamp invalidates the checksum.
+   - Built-in verification via `verifyOperationIntegrity()` and CLI `verify <opId>`.
+
+3. **Canonical Payload Serialization**:
+   - Deterministic JSON serializer (`canonicalize`) that recursively sorts object keys lexicographically.
+   - Logical equivalence: `{ "title": "A", "priority": 1 }` and `{ "priority": 1, "title": "A" }` produce the exact same canonical string and SHA-256 hash.
+
+4. **Explicit Operation Lifecycle**:
+   - Operations transition cleanly through states:
+     - `PENDING`: Stored in durable operation log, awaiting application or reconciliation.
+     - `APPLIED`: Durably applied to local state, with `appliedAt` timestamp recorded.
+     - `FAILED`: Marked if an operation fails execution preconditions, retaining `errorMessage`.
+   - Transitions:
+     - `PENDING -> APPLIED`
+     - `PENDING -> FAILED`
+   - Deterministic replay: An operation already marked `APPLIED` cannot be re-applied to alter state.
+
+5. **Hardened Idempotency & Safe Replay**:
+   - **New Operation**: Stored as `PENDING`, applied to local state, transitioned to `APPLIED`.
+   - **Replay of APPLIED Operation**: Verifies checksum integrity against stored record. If identical, executes a deterministic no-op without mutating state.
+   - **Conflicting/Tampered Operation**: If incoming operation shares an existing `operationId` but has different content or checksum, it is rejected with `OperationIntegrityError`.
+   - **Reconcile PENDING Operation**: Safely resumes uncompleted operations to `APPLIED`.
+
+6. **Advanced Querying & Filtering**:
+   - Query by operation ID (`getOperation`)
+   - Query by sequence number (`getOperationBySequence`)
+   - Query by node (`getOperationsByNode`)
+   - Query by status (`getOperationsByStatus`, `getPendingOperations`, `getAppliedOperations`, `getFailedOperations`)
+   - Query by entity (`getOperationsByEntity`)
+   - Query operations after sequence range (`getOperationsAfterSequence`)
+   - Independent sequence counter per node (`(node_id, sequence_number)` unique index)
+
+7. **Zero-Loss Database Schema Migration**:
+   - Backward-compatible schema evolution adds `checksum` and `error_message` columns automatically without resetting existing data.
 
 ---
 
 ## Architecture
-
-The Phase 1 architecture follows a clean, decoupled layout designed for modular extension in future phases:
 
 ```text
 meshvault/
 │
 ├── src/
 │   ├── config/
-│   │   └── node.ts              # Node identity configuration and persistence
+│   │   └── node.ts              # Persistent node identity management (atomic transaction)
 │   │
 │   ├── database/
-│   │   ├── db.ts                # Database connection, WAL pragma setup, and transaction manager
-│   │   └── schema.ts            # DDL schemas and database indexes
+│   │   ├── db.ts                # DatabaseManager with node:sqlite, WAL, migrations, & transactions
+│   │   └── schema.ts            # DDL schemas and multi-column indexes
 │   │
 │   ├── operations/
-│   │   ├── types.ts             # Domain models (Operation, OperationType, RecordEntity)
-│   │   └── operation-manager.ts # Operation creation, storage, and state application
+│   │   ├── types.ts             # Domain models (Operation, OperationType, OperationStatus)
+│   │   ├── canonical.ts         # Deterministic canonical JSON serializer
+│   │   ├── integrity.ts         # SHA-256 checksum calculation & verification
+│   │   ├── validator.ts         # OperationValidator for parameters and structural integrity
+│   │   └── operation-manager.ts # Operation creation, validation, storage, replay, & queries
 │   │
-│   ├── errors.ts                # Domain-specific error types
+│   ├── errors.ts                # Typed domain errors
 │   └── index.ts                 # CLI entry point and interactive REPL
 │
 ├── data/
-│   └── meshvault.db             # Local SQLite database (auto-created)
+│   └── meshvault.db             # Local SQLite database (WAL mode)
 │
 ├── tests/
-│   ├── database.test.ts         # Schema & transaction tests
+│   ├── database.test.ts         # Schema & transaction rollback tests
 │   ├── errors.test.ts           # Validation & error handling tests
-│   ├── node-identity.test.ts    # Identity generation & restart persistence tests
-│   ├── operations.test.ts       # Operations, state application, & idempotency tests
-│   ├── restart.test.ts          # End-to-end restart verification test
-│   └── test-utils.ts            # Test helpers for safe temporary SQLite databases
+│   ├── integrity.test.ts        # Checksum & canonical payload tests
+│   ├── node-identity.test.ts    # Node identity persistence tests
+│   ├── operations.test.ts       # Operations lifecycle, sequence, and atomicity tests
+│   ├── queries.test.ts          # Querying and multi-node sequence tests
+│   ├── replay-lifecycle.test.ts # Replay, tamper detection, & state machine tests
+│   ├── repl-parser.test.ts      # Command line parser tests
+│   ├── restart.test.ts          # Mandatory restart persistence verification
+│   └── test-utils.ts            # Test isolation utilities
 │
 ├── .gitignore
 ├── package.json
@@ -64,22 +106,14 @@ meshvault/
 
 ---
 
-## Database Schema
+## Database Schema (Phase 2)
 
-MeshVault uses SQLite via Node.js built-in `node:sqlite` in WAL (Write-Ahead Logging) mode for durability and concurrent read performance.
-
-### 1. `node_info` Table
-Stores node identity metadata.
 ```sql
 CREATE TABLE IF NOT EXISTS node_info (
   node_id TEXT PRIMARY KEY,
   created_at TEXT NOT NULL
 );
-```
 
-### 2. `records` Table
-Stores current local materialized state.
-```sql
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY,
   entity_type TEXT NOT NULL,
@@ -89,11 +123,7 @@ CREATE TABLE IF NOT EXISTS records (
 );
 
 CREATE INDEX IF NOT EXISTS idx_records_entity_type ON records(entity_type);
-```
 
-### 3. `operations` Table
-Stores the append-only local operation log.
-```sql
 CREATE TABLE IF NOT EXISTS operations (
   operation_id TEXT PRIMARY KEY,
   node_id TEXT NOT NULL,
@@ -102,57 +132,58 @@ CREATE TABLE IF NOT EXISTS operations (
   entity_type TEXT NOT NULL,
   entity_id TEXT NOT NULL,
   payload TEXT NOT NULL,
-  status TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PENDING',
   created_at TEXT NOT NULL,
-  applied_at TEXT
+  applied_at TEXT,
+  checksum TEXT NOT NULL DEFAULT '',
+  error_message TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_operations_node_seq ON operations(node_id, sequence_number);
 CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status);
 CREATE INDEX IF NOT EXISTS idx_operations_entity ON operations(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_operations_node_status ON operations(node_id, status);
+CREATE INDEX IF NOT EXISTS idx_operations_node_seq_range ON operations(node_id, sequence_number ASC);
 ```
 
 ---
 
-## Operation Lifecycle
+## Operation Lifecycle & State Machine
 
 ```text
-User / Application Action
-          ↓
-  Validate Input (type, entityId, payload)
-          ↓
-  Generate Operation ID (op-<seq>-<uuid>)
-          ↓
-  Assign Persistent Node ID
-          ↓
-  Assign Monotonic Sequence Number (MAX(seq) + 1)
-          ↓
-  BEGIN TRANSACTION
-    ├── 1. INSERT INTO operations (status: 'PENDING')
-    └── 2. Apply Operation to 'records' state
-  COMMIT TRANSACTION
+                  User / Application Action
+                              ↓
+              Validate Input (OperationValidator)
+                              ↓
+                Assign Persistent Node ID
+                              ↓
+            Assign Monotonic Sequence Number
+                              ↓
+          Compute Deterministic SHA-256 Checksum
+                              ↓
+           BEGIN IMMEDIATE DATABASE TRANSACTION
+                              ↓
+          1. INSERT INTO operations (status: 'PENDING')
+                              ↓
+          2. Apply to 'records' State (CREATE / UPDATE / DELETE)
+                              ↓
+          3. UPDATE operations SET status = 'APPLIED', applied_at = now
+                              ↓
+             COMMIT DATABASE TRANSACTION (Atomic)
 ```
 
-1. **CREATE**: Inserts record into `records`. If entity ID already exists, creation is rejected.
-2. **UPDATE**: Merges new payload attributes into existing record `data` and updates `updated_at`. Target entity must exist.
-3. **DELETE**: Removes record from `records`. Target entity must exist.
-4. **Idempotency**: Applying an operation that has already been recorded and marked with `applied_at` is safely ignored without re-mutating state.
+### State Transitions:
+* `PENDING -> APPLIED`: Normal execution and replay of unapplied operations.
+* `PENDING -> FAILED`: Precondition or execution failure.
+* `APPLIED -> APPLIED`: Deterministic no-op replay (state is not altered).
+* `APPLIED (tampered)`: Checksum mismatch throws `OperationIntegrityError`.
 
 ---
 
 ## Installation & Setup
 
-### Prerequisites
-- Node.js 22.5.0 or later (v24+ recommended, tested on Node v24.11.0)
-- npm
-
-### Installation
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd "Mesh Fault"
-
-# Install development dependencies
+# Install dependencies
 npm install
 
 # Compile TypeScript
@@ -161,64 +192,79 @@ npm run build
 
 ---
 
-## How to Run
+## CLI Usage
 
-### Interactive REPL Mode
-Start an interactive shell session:
-```bash
-npm start
-```
-Inside the interactive prompt:
-```text
-meshvault> node-id
-meshvault> create task task-001 {"title":"Learn Distributed Systems"}
-meshvault> records
-meshvault> update task task-001 {"status":"completed"}
-meshvault> operations
-meshvault> pending
-meshvault> delete task task-001
-meshvault> exit
-```
-
-### Direct CLI Commands
-You can also run commands directly:
-
+### Direct Commands
 ```bash
 # Check current Node ID
 npm run cli -- node-id
 
-# Create a record
-npm run cli -- create task task-001 '{"title":"Learn Distributed Systems"}'
+# Create a record (auto-computes SHA-256 checksum and marks APPLIED)
+npm run cli -- create task task-001 '{"title":"Learn Distributed Systems","priority":1}'
 
-# List all local records
+# View all records
 npm run cli -- records
 
 # Update a record
-npm run cli -- update task task-001 '{"status":"completed"}'
-
-# View the full operation log
-npm run cli -- operations
-
-# View pending operations
-npm run cli -- pending
+npm run cli -- update task task-001 '{"priority":2}'
 
 # Delete a record
 npm run cli -- delete task task-001
+
+# View operation log
+npm run cli -- operations
+
+# Inspect an individual operation
+npm run cli -- operation <operation_id>
+
+# Verify cryptographic integrity of an operation
+npm run cli -- verify <operation_id>
+
+# Filter operations by status
+npm run cli -- applied
+npm run cli -- pending
+npm run cli -- failed
+```
+
+### Interactive REPL
+```bash
+npm start
+```
+```text
+meshvault> node-id
+meshvault> create task task-001 {"title":"Learn Distributed Systems"}
+meshvault> operation op-001-xxxx
+meshvault> verify op-001-xxxx
+meshvault> records
+meshvault> exit
 ```
 
 ---
 
-## How to Test
+## Automated Testing
 
-Run the full automated test suite using Node's test runner and `tsx`:
+Run the full automated test suite (54 tests across 10 suites):
 
 ```bash
 npm test
 ```
 
-### Test Suites Included:
-- **`tests/database.test.ts`**: Verifies database initialization, table creation, indexes, and transaction rollback/commit semantics.
-- **`tests/node-identity.test.ts`**: Verifies node ID generation, custom ID assignment, and persistent identity across restarts.
-- **`tests/operations.test.ts`**: Verifies sequence counter monotonicity, `CREATE`/`UPDATE`/`DELETE` execution, operation retrieval, pending filters, and idempotency protection.
-- **`tests/restart.test.ts`**: Implements the mandatory Section 15 restart specification: creating 3 operations, closing the database, restarting, and verifying node ID, sequence counter, operation history, and local state.
-- **`tests/errors.test.ts`**: Validates comprehensive domain error handling (invalid operation types, empty entity IDs, duplicate operation IDs, invalid payloads, non-existent entity updates/deletions).
+### Test Suites:
+1. `tests/validation.test.ts`: Input and operation schema validation.
+2. `tests/integrity.test.ts`: Deterministic hashing, canonicalization, and tamper detection.
+3. `tests/operations.test.ts`: Operation creation, state application, and rollback atomicity.
+4. `tests/queries.test.ts`: Multi-criteria querying and multi-node sequence isolation.
+5. `tests/replay-lifecycle.test.ts`: Idempotent replay, modified operation rejection, and PENDING reconciliation.
+6. `tests/database.test.ts`: Table DDL, index integrity, and transaction commit/rollback.
+7. `tests/node-identity.test.ts`: Node ID generation and persistent identity.
+8. `tests/restart.test.ts`: End-to-end restart persistence across state, operations, and checksums.
+9. `tests/errors.test.ts`: Domain error validation.
+10. `tests/repl-parser.test.ts`: CLI/REPL command line parsing.
+
+---
+
+## Limitations (Phase 2 Boundaries)
+
+1. **Standalone Offline Operation**: No remote synchronization, WebSocket, or REST transport is present.
+2. **Local Sequence Numbers**: Sequence numbers are strictly node-local. Distributed vector clocks and conflict resolution belong to future phases.
+3. **Single Active Writer**: Single node process per SQLite database file via WAL mode.

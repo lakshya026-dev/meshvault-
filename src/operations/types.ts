@@ -1,6 +1,6 @@
 export type OperationType = 'CREATE' | 'UPDATE' | 'DELETE';
 
-export type OperationStatus = 'PENDING';
+export type OperationStatus = 'PENDING' | 'APPLIED' | 'FAILED';
 
 export interface Operation<T = Record<string, unknown>> {
   operationId: string;
@@ -12,7 +12,9 @@ export interface Operation<T = Record<string, unknown>> {
   payload: T;
   status: OperationStatus;
   createdAt: string;
-  appliedAt?: string | null;
+  appliedAt: string | null;
+  checksum: string;
+  errorMessage?: string | null;
 }
 
 export interface CreateOperationInput<T = Record<string, unknown>> {

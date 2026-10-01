@@ -3,10 +3,11 @@ import * as assert from 'node:assert';
 import { DatabaseManager } from '../src/database/db.js';
 import { NodeConfig } from '../src/config/node.js';
 import { OperationManager } from '../src/operations/operation-manager.js';
+import { verifyOperationIntegrity } from '../src/operations/integrity.js';
 import { getUniqueTestDbPath, cleanupTestFile } from './test-utils.js';
 
-describe('Phase 1 Mandatory Restart Test (Section 15)', () => {
-  it('preserves node ID, database, operation history, sequence counter, and local state across restart', () => {
+describe('Phase 2 Mandatory Restart Test', () => {
+  it('preserves node ID, database, operation history, checksums, statuses, sequence counter, and local state across restart', () => {
     const dbPath = getUniqueTestDbPath('restart_spec');
 
     // ------------------------------------------------------------------
@@ -30,7 +31,9 @@ describe('Phase 1 Mandatory Restart Test (Section 15)', () => {
       payload: { title: 'Learn Distributed Systems', status: 'pending' },
     });
     assert.strictEqual(op1.sequenceNumber, 1);
-    assert.strictEqual(op1.status, 'PENDING');
+    assert.strictEqual(op1.status, 'APPLIED');
+    assert.ok(op1.checksum);
+    assert.ok(verifyOperationIntegrity(op1));
 
     // Operation 2: UPDATE task-001
     const op2 = opManager.createOperation({
@@ -40,7 +43,9 @@ describe('Phase 1 Mandatory Restart Test (Section 15)', () => {
       payload: { status: 'in-progress' },
     });
     assert.strictEqual(op2.sequenceNumber, 2);
-    assert.strictEqual(op2.status, 'PENDING');
+    assert.strictEqual(op2.status, 'APPLIED');
+    assert.ok(op2.checksum);
+    assert.ok(verifyOperationIntegrity(op2));
 
     // Operation 3: CREATE task-002
     const op3 = opManager.createOperation({
@@ -50,7 +55,9 @@ describe('Phase 1 Mandatory Restart Test (Section 15)', () => {
       payload: { title: 'Master Event Sourcing' },
     });
     assert.strictEqual(op3.sequenceNumber, 3);
-    assert.strictEqual(op3.status, 'PENDING');
+    assert.strictEqual(op3.status, 'APPLIED');
+    assert.ok(op3.checksum);
+    assert.ok(verifyOperationIntegrity(op3));
 
     // Verify state before shutdown
     assert.strictEqual(opManager.getCurrentSequenceNumber(), 3);
@@ -85,23 +92,30 @@ describe('Phase 1 Mandatory Restart Test (Section 15)', () => {
       'Next sequence number must be 4'
     );
 
-    // Verify 3: Same operation history
+    // Verify 3: Same operation history & checksums
     const opsAfter = opManager.getAllOperations();
     assert.strictEqual(opsAfter.length, 3, 'Must retain all 3 operations');
+
     assert.strictEqual(opsAfter[0].operationId, op1.operationId);
     assert.strictEqual(opsAfter[0].sequenceNumber, 1);
     assert.strictEqual(opsAfter[0].operationType, 'CREATE');
-    assert.strictEqual(opsAfter[0].status, 'PENDING');
+    assert.strictEqual(opsAfter[0].status, 'APPLIED');
+    assert.strictEqual(opsAfter[0].checksum, op1.checksum);
+    assert.ok(verifyOperationIntegrity(opsAfter[0]));
 
     assert.strictEqual(opsAfter[1].operationId, op2.operationId);
     assert.strictEqual(opsAfter[1].sequenceNumber, 2);
     assert.strictEqual(opsAfter[1].operationType, 'UPDATE');
-    assert.strictEqual(opsAfter[1].status, 'PENDING');
+    assert.strictEqual(opsAfter[1].status, 'APPLIED');
+    assert.strictEqual(opsAfter[1].checksum, op2.checksum);
+    assert.ok(verifyOperationIntegrity(opsAfter[1]));
 
     assert.strictEqual(opsAfter[2].operationId, op3.operationId);
     assert.strictEqual(opsAfter[2].sequenceNumber, 3);
     assert.strictEqual(opsAfter[2].operationType, 'CREATE');
-    assert.strictEqual(opsAfter[2].status, 'PENDING');
+    assert.strictEqual(opsAfter[2].status, 'APPLIED');
+    assert.strictEqual(opsAfter[2].checksum, op3.checksum);
+    assert.ok(verifyOperationIntegrity(opsAfter[2]));
 
     // Verify 4: Same local state
     const recordsAfter = opManager.getAllRecords();
@@ -127,6 +141,7 @@ describe('Phase 1 Mandatory Restart Test (Section 15)', () => {
       payload: {},
     });
     assert.strictEqual(op4.sequenceNumber, 4);
+    assert.strictEqual(op4.status, 'APPLIED');
     assert.strictEqual(opManager.getAllRecords().length, 1);
     assert.strictEqual(opManager.getAllOperations().length, 4);
 
