@@ -54,3 +54,10 @@ export class DatabaseError extends MeshVaultError {
     this.name = 'DatabaseError';
   }
 }
+
+export class NetworkError extends MeshVaultError {
+  constructor(message: string, public readonly statusCode?: number, public readonly cause?: unknown) {
+    super(message);
+    this.name = 'NetworkError';
+  }
+}

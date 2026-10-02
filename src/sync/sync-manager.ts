@@ -2,6 +2,7 @@ import type { OperationManager } from '../operations/operation-manager.js';
 import { serializeCanonical } from '../operations/canonical.js';
 import { verifyOperationIntegrity } from '../operations/integrity.js';
 import type { Operation, OperationType } from '../operations/types.js';
+import { MeshVaultError, NetworkError } from '../errors.js';
 
 export type ReceiveOutcome = 'applied' | 'duplicate' | 'rejected';
 export type RejectionReason =
@@ -33,6 +34,50 @@ export interface ReceiveOperationsResult {
 export interface PeerSyncResult {
   pulled: ReceiveOperationsResult;
   pushed: ReceiveOperationsResult;
+}
+
+export interface RetryOptions {
+  maxRetries?: number;
+  initialDelayMs?: number;
+  maxDelayMs?: number;
+  backoffFactor?: number;
+  attemptTimeoutMs?: number;
+  jitter?: boolean;
+}
+
+export function calculateBackoffDelay(
+  retryCount: number,
+  options: Required<RetryOptions>
+): number {
+  if (retryCount <= 0) return 0;
+  const baseDelay = options.initialDelayMs * Math.pow(options.backoffFactor, retryCount - 1);
+  const cappedDelay = Math.min(baseDelay, options.maxDelayMs);
+  if (options.jitter) {
+    return Math.floor(cappedDelay * (0.8 + 0.4 * Math.random()));
+  }
+  return Math.floor(cappedDelay);
+}
+
+function isRetryableStatusCode(status: number): boolean {
+  return [429, 500, 502, 503, 504].includes(status);
+}
+
+function isRetryableError(error: unknown): boolean {
+  if (error instanceof NetworkError) {
+    if (error.statusCode !== undefined) {
+      return isRetryableStatusCode(error.statusCode);
+    }
+    return true;
+  }
+  if (error instanceof Error) {
+    if (error.name === 'AbortError') return true;
+    const code = (error as { code?: string }).code;
+    if (code && ['ECONNREFUSED', 'ECONNRESET', 'EHOSTUNREACH', 'ETIMEDOUT', 'EAI_AGAIN'].includes(code)) {
+      return true;
+    }
+    if (error instanceof TypeError) return true;
+  }
+  return false;
 }
 
 interface ValidRemoteOperation extends Operation<Record<string, unknown>> {
@@ -133,13 +178,23 @@ function sameContent(left: Operation, right: Operation): boolean {
 }
 
 export class SyncManager {
-  private static readonly requestTimeoutMs = 10_000;
   private static readonly transferBatchSize = 1_000;
+  private readonly retryOptions: Required<RetryOptions>;
 
   constructor(
     private readonly operationManager: OperationManager,
-    private readonly localNodeId: string
-  ) {}
+    private readonly localNodeId: string,
+    retryOptions?: RetryOptions
+  ) {
+    this.retryOptions = {
+      maxRetries: retryOptions?.maxRetries ?? 3,
+      initialDelayMs: retryOptions?.initialDelayMs ?? 100,
+      maxDelayMs: retryOptions?.maxDelayMs ?? 2000,
+      backoffFactor: retryOptions?.backoffFactor ?? 2,
+      attemptTimeoutMs: retryOptions?.attemptTimeoutMs ?? 3000,
+      jitter: retryOptions?.jitter ?? true,
+    };
+  }
 
   public getSyncStatus(): { nodeId: string; sequences: Record<string, number> } {
     return {
@@ -331,30 +386,84 @@ export class SyncManager {
   }
 
   private async fetchJson(url: string, init?: RequestInit): Promise<unknown> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), SyncManager.requestTimeoutMs);
-    try {
-      const response = await fetch(url, { ...init, signal: controller.signal });
-      const text = await response.text();
-      let body: unknown;
+    let retries = 0;
+
+    while (true) {
+      const controller = new AbortController();
+      const timeout = setTimeout(
+        () => controller.abort(),
+        this.retryOptions.attemptTimeoutMs
+      );
+
       try {
-        body = text === '' ? null : JSON.parse(text);
-      } catch {
-        throw new Error(`Peer returned invalid JSON (${response.status}).`);
+        const response = await fetch(url, { ...init, signal: controller.signal });
+        clearTimeout(timeout);
+
+        const status = response.status;
+        if (!response.ok) {
+          const isRetryableStatus = isRetryableStatusCode(status);
+          const err = new NetworkError(`Peer request failed with HTTP ${status}.`, status);
+          if (isRetryableStatus && retries < this.retryOptions.maxRetries) {
+            retries += 1;
+            const delay = calculateBackoffDelay(retries, this.retryOptions);
+            if (delay > 0) {
+              await new Promise((resolve) => setTimeout(resolve, delay));
+            }
+            continue;
+          }
+          throw err;
+        }
+
+        const text = await response.text();
+        let body: unknown;
+        try {
+          body = text === '' ? null : JSON.parse(text);
+        } catch {
+          throw new MeshVaultError(`Peer returned invalid JSON (${status}).`);
+        }
+        return body;
+      } catch (error) {
+        clearTimeout(timeout);
+
+        if (error instanceof MeshVaultError && !(error instanceof NetworkError)) {
+          throw error;
+        }
+
+        if (error instanceof NetworkError && error.statusCode !== undefined) {
+          if (!isRetryableStatusCode(error.statusCode)) {
+            throw error;
+          }
+        }
+
+        const retryable = isRetryableError(error);
+        if (retryable && retries < this.retryOptions.maxRetries) {
+          retries += 1;
+          const delay = calculateBackoffDelay(retries, this.retryOptions);
+          if (delay > 0) {
+            await new Promise((resolve) => setTimeout(resolve, delay));
+          }
+          continue;
+        }
+
+        if (error instanceof MeshVaultError) {
+          throw error;
+        }
+        if (error instanceof Error && error.name === 'AbortError') {
+          throw new NetworkError(
+            `Peer request timed out after ${this.retryOptions.attemptTimeoutMs} ms.`,
+            undefined,
+            error
+          );
+        }
+        throw new NetworkError(
+          error instanceof Error ? error.message : String(error),
+          undefined,
+          error
+        );
       }
-      if (!response.ok) {
-        throw new Error(`Peer request failed with HTTP ${response.status}.`);
-      }
-      return body;
-    } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error(`Peer request timed out after ${SyncManager.requestTimeoutMs} ms.`);
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeout);
     }
   }
+
 
   private parsePeerSequences(value: unknown): Record<string, number> {
     if (!isRecord(value) || !isRecord(value.sequences)) {
