@@ -17,7 +17,10 @@ export interface MeshVaultApp {
 }
 
 export function initMeshVault(customDbPath?: string, preferredNodeId?: string): MeshVaultApp {
-  const dbPath = customDbPath ?? path.resolve(process.cwd(), 'data', 'meshvault.db');
+  const dbPath =
+    customDbPath ??
+    process.env.MESHVAULT_DB_PATH ??
+    path.resolve(process.cwd(), 'data', 'meshvault.db');
   const db = new DatabaseManager({ dbPath });
   const nodeConfig = new NodeConfig(db, preferredNodeId);
   const opManager = new OperationManager(db, nodeConfig);
@@ -487,11 +490,27 @@ export async function executeCommand(app: MeshVaultApp, args: string[]): Promise
   }
 }
 
+export function resolveSyncPort(): number {
+  const configuredValue = process.env.MESHVAULT_PORT ?? process.env.MESHVAULT_SYNC_PORT ?? '3000';
+  const configuredPort = Number(configuredValue);
+
+  if (
+    process.env.MESHVAULT_PORT !== undefined &&
+    (!/^(0|[1-9]\d*)$/.test(configuredValue) ||
+      !Number.isSafeInteger(configuredPort) ||
+      configuredPort > 65535)
+  ) {
+    throw new Error(`Invalid MESHVAULT_PORT: ${configuredValue}. Expected an integer from 0 to 65535.`);
+  }
+
+  const port = Number.isSafeInteger(configuredPort) && configuredPort >= 0 && configuredPort <= 65535
+    ? configuredPort
+    : 3000;
+  return port;
+}
+
 async function startSyncServer(app: MeshVaultApp): Promise<number> {
-  const configuredPort = Number.parseInt(process.env.MESHVAULT_SYNC_PORT ?? '3000', 10);
-  const port = Number.isSafeInteger(configuredPort) && configuredPort >= 0 ? configuredPort : 3000;
-  const host = process.env.MESHVAULT_SYNC_HOST ?? '127.0.0.1';
-  return app.syncServer.start(port, host);
+  return app.syncServer.start(resolveSyncPort(), process.env.MESHVAULT_SYNC_HOST ?? '127.0.0.1');
 }
 
 export async function startRepl(app: MeshVaultApp): Promise<void> {

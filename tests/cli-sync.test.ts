@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert';
-import { executeCommand, initMeshVault } from '../src/index.js';
+import * as path from 'node:path';
+import { executeCommand, initMeshVault, resolveSyncPort } from '../src/index.js';
 import { cleanupTestFile, getUniqueTestDbPath } from './test-utils.js';
 
 async function captureOutput(action: () => Promise<unknown>): Promise<{ stdout: string; stderr: string }> {
@@ -24,7 +25,72 @@ function createApp(prefix: string) {
   return { app: initMeshVault(dbPath, 'node-cli'), dbPath };
 }
 
+function withEnvironment<T>(values: Record<string, string | undefined>, action: () => T): T {
+  const previous = new Map<string, string | undefined>();
+  for (const [key, value] of Object.entries(values)) {
+    previous.set(key, process.env[key]);
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+
+  try {
+    return action();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
 describe('CLI synchronization commands', () => {
+  it('uses the default database path and sync port without environment variables', () => {
+    const app = withEnvironment(
+      { MESHVAULT_DB_PATH: undefined, MESHVAULT_PORT: undefined, MESHVAULT_SYNC_PORT: undefined },
+      () => initMeshVault(undefined, 'node-config-default')
+    );
+    try {
+      assert.strictEqual(app.dbPath, path.resolve(process.cwd(), 'data', 'meshvault.db'));
+      assert.strictEqual(withEnvironment({ MESHVAULT_PORT: undefined, MESHVAULT_SYNC_PORT: undefined }, resolveSyncPort), 3000);
+    } finally {
+      app.db.close();
+    }
+  });
+
+  it('uses independent database paths and sync ports from environment variables', () => {
+    for (const [dbPath, port] of [
+      ['data/node-a.db', '3001'],
+      ['data/node-b.db', '3002'],
+    ] as const) {
+      withEnvironment(
+        { MESHVAULT_DB_PATH: dbPath, MESHVAULT_PORT: port },
+        () => {
+          const app = initMeshVault(undefined, `node-${port}`);
+          try {
+            assert.strictEqual(app.dbPath, dbPath);
+            assert.strictEqual(resolveSyncPort(), Number(port));
+          } finally {
+            app.db.close();
+            cleanupTestFile(path.resolve(process.cwd(), dbPath));
+          }
+        }
+      );
+    }
+  });
+
+  it('rejects an explicitly invalid sync port', () => {
+    assert.throws(
+      () => withEnvironment({ MESHVAULT_PORT: 'not-a-port' }, resolveSyncPort),
+      /Invalid MESHVAULT_PORT: not-a-port/
+    );
+  });
+
   it('prints sync-status with the node ID and sequence vector', async () => {
     const { app, dbPath } = createApp('cli-sync-status');
     try {
