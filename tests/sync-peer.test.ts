@@ -37,6 +37,7 @@ function createOperation(
     createdAt: new Date().toISOString(),
     appliedAt: null,
     checksum: '',
+    schemaVersion: 1,
     errorMessage: null,
   };
   operation.checksum = computeOperationChecksum(operation);

@@ -2,6 +2,7 @@ import type { OperationManager } from '../operations/operation-manager.js';
 import { serializeCanonical } from '../operations/canonical.js';
 import { verifyOperationIntegrity } from '../operations/integrity.js';
 import type { Operation, OperationType } from '../operations/types.js';
+import { isSupportedSchemaVersion } from '../operations/types.js';
 import { MeshVaultError, NetworkError } from '../errors.js';
 
 export type ReceiveOutcome = 'applied' | 'duplicate' | 'rejected';
@@ -149,8 +150,13 @@ function validateIncoming(value: unknown, inputIndex: number): ValidRemoteOperat
     appliedAt: null,
     checksum: value.checksum as string,
     errorMessage: null,
+    schemaVersion: value.schemaVersion as number,
     inputIndex,
   };
+
+  if (!isSupportedSchemaVersion(operation.schemaVersion)) {
+    return resultFor(operation, 'rejected', 'malformed');
+  }
 
   if (!/^[0-9a-f]{64}$/i.test(operation.checksum)) {
     return resultFor(operation, 'rejected', 'malformed');
@@ -172,6 +178,7 @@ function sameContent(left: Operation, right: Operation): boolean {
     left.entityType === right.entityType &&
     left.entityId === right.entityId &&
     left.createdAt === right.createdAt &&
+    left.schemaVersion === right.schemaVersion &&
     left.checksum === right.checksum &&
     serializeCanonical(left.payload) === serializeCanonical(right.payload)
   );

@@ -110,14 +110,15 @@ describe('OperationManager Queries', () => {
       entityId: 'task-pend',
       payload: { title: 'Pending Task' },
       createdAt,
+      schemaVersion: 1,
     });
 
     db.getRawDb()
       .prepare(
         `INSERT INTO operations (
           operation_id, node_id, sequence_number, operation_type,
-          entity_type, entity_id, payload, status, created_at, checksum
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          entity_type, entity_id, payload, status, created_at, checksum, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         'op-pending-1',
@@ -129,7 +130,8 @@ describe('OperationManager Queries', () => {
         JSON.stringify({ title: 'Pending Task' }),
         'PENDING',
         createdAt,
-        pendingChecksum
+        pendingChecksum,
+        1
       );
 
     const pendingOps = opManager.getPendingOperations();
@@ -205,6 +207,7 @@ describe('OperationManager Queries', () => {
       entityId: 'task-from-b',
       payload: { by: 'B' },
       createdAt,
+      schemaVersion: 1,
     });
 
     const opB1 = {
@@ -219,6 +222,7 @@ describe('OperationManager Queries', () => {
       createdAt,
       appliedAt: null,
       checksum: checksumB1,
+      schemaVersion: 1,
     };
 
     opManagerA.applyOperation(opB1);

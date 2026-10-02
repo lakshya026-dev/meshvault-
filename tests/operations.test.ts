@@ -380,6 +380,7 @@ describe('OperationManager', () => {
       entityId: 'task-standalone',
       payload: { title: 'External / Synced Op' },
       createdAt,
+      schemaVersion: 1,
     });
 
     const standaloneOp = {
@@ -394,6 +395,7 @@ describe('OperationManager', () => {
       createdAt,
       appliedAt: null,
       checksum,
+      schemaVersion: 1,
     };
 
     // Apply standalone operation

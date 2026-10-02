@@ -33,6 +33,7 @@ function createRemoteOperation(
     createdAt,
     appliedAt: null,
     checksum: '',
+    schemaVersion: 1,
   };
   operation.checksum = computeOperationChecksum(operation);
   return operation;

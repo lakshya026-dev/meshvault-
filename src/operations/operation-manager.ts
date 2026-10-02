@@ -7,6 +7,8 @@ import {
   RecordEntity,
   OperationType,
   OperationStatus,
+  CURRENT_SCHEMA_VERSION,
+  isSupportedSchemaVersion,
 } from './types.js';
 import {
   InvalidOperationError,
@@ -31,6 +33,7 @@ interface RawOperationRow {
   applied_at: string | null;
   checksum: string;
   error_message: string | null;
+  schema_version: number;
 }
 
 interface RawRecordRow {
@@ -120,7 +123,14 @@ export class OperationManager {
         `op-${String(sequenceNumber).padStart(3, '0')}-${randomUUID().slice(0, 6)}`;
       const createdAt = new Date().toISOString();
 
-      // Compute deterministic SHA-256 integrity checksum
+      // Normalize schemaVersion: use input value if supplied, otherwise default to CURRENT_SCHEMA_VERSION.
+      // Legacy/unversioned input (schemaVersion omitted) gets CURRENT_SCHEMA_VERSION for newly created ops.
+      const schemaVersion: number =
+        typeof input.schemaVersion === 'number' ? input.schemaVersion : CURRENT_SCHEMA_VERSION;
+
+      // Compute deterministic SHA-256 integrity checksum.
+      // schemaVersion participates in the canonical hash for v2+ operations
+      // (9-field formula). v1 operations use the original 8-field formula.
       const checksum = computeOperationChecksum({
         operationId,
         nodeId,
@@ -130,6 +140,7 @@ export class OperationManager {
         entityId: input.entityId,
         payload: input.payload,
         createdAt,
+        schemaVersion,
       });
 
       const operation: Operation<T> = {
@@ -145,6 +156,7 @@ export class OperationManager {
         appliedAt: null,
         checksum,
         errorMessage: null,
+        schemaVersion,
       };
 
       // Validate the constructed operation
@@ -155,8 +167,9 @@ export class OperationManager {
         .prepare(
           `INSERT INTO operations (
             operation_id, node_id, sequence_number, operation_type,
-            entity_type, entity_id, payload, status, created_at, applied_at, checksum, error_message
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            entity_type, entity_id, payload, status, created_at, applied_at,
+            checksum, error_message, schema_version
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           operation.operationId,
@@ -170,7 +183,8 @@ export class OperationManager {
           operation.createdAt,
           null,
           operation.checksum,
-          null
+          null,
+          operation.schemaVersion
         );
 
       // 2. Apply operation to local state and transition PENDING -> APPLIED
@@ -230,8 +244,9 @@ export class OperationManager {
           .prepare(
             `INSERT INTO operations (
               operation_id, node_id, sequence_number, operation_type,
-              entity_type, entity_id, payload, status, created_at, applied_at, checksum, error_message
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+              entity_type, entity_id, payload, status, created_at, applied_at,
+              checksum, error_message, schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           )
           .run(
             operation.operationId,
@@ -245,7 +260,8 @@ export class OperationManager {
             operation.createdAt,
             null,
             operation.checksum,
-            null
+            null,
+            operation.schemaVersion
           );
       }
 
@@ -456,6 +472,13 @@ export class OperationManager {
   private mapRowToOperation<T = Record<string, unknown>>(
     row: RawOperationRow
   ): Operation<T> {
+    if (!isSupportedSchemaVersion(row.schema_version)) {
+      throw new InvalidOperationError(
+        `Operation '${row.operation_id}' has an unsupported or missing schema version.`
+      );
+    }
+    const schemaVersion = row.schema_version;
+
     return {
       operationId: row.operation_id,
       nodeId: row.node_id,
@@ -469,6 +492,7 @@ export class OperationManager {
       appliedAt: row.applied_at,
       checksum: row.checksum,
       errorMessage: row.error_message,
+      schemaVersion,
     };
   }
 

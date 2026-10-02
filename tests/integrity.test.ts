@@ -38,6 +38,7 @@ describe('Operation Integrity & Canonicalization', () => {
       entityId: 'task-001',
       payload: { title: 'Learn Systems', level: 'advanced' },
       createdAt: '2026-10-01T12:00:00.000Z',
+      schemaVersion: 1,
     });
 
     const checksum2 = computeOperationChecksum({
@@ -49,6 +50,7 @@ describe('Operation Integrity & Canonicalization', () => {
       entityId: 'task-001',
       payload: { level: 'advanced', title: 'Learn Systems' },
       createdAt: '2026-10-01T12:00:00.000Z',
+      schemaVersion: 1,
     });
 
     assert.strictEqual(checksum1, checksum2);
@@ -68,6 +70,7 @@ describe('Operation Integrity & Canonicalization', () => {
       entityId: 'task-v1',
       payload,
       createdAt,
+      schemaVersion: 1,
     });
 
     const operation: Operation = {
@@ -82,6 +85,7 @@ describe('Operation Integrity & Canonicalization', () => {
       createdAt,
       appliedAt: null,
       checksum,
+      schemaVersion: 1,
     };
 
     assert.strictEqual(verifyOperationIntegrity(operation), true);
@@ -98,6 +102,7 @@ describe('Operation Integrity & Canonicalization', () => {
       entityId: 'task-t1',
       payload: { amount: 100 },
       createdAt,
+      schemaVersion: 1,
     });
 
     // Tampered payload (changed amount from 100 to 9999)
@@ -113,6 +118,7 @@ describe('Operation Integrity & Canonicalization', () => {
       createdAt,
       appliedAt: null,
       checksum,
+      schemaVersion: 1,
     };
 
     assert.strictEqual(verifyOperationIntegrity(tamperedOp), false);
@@ -129,6 +135,7 @@ describe('Operation Integrity & Canonicalization', () => {
       entityId: 'task-t2',
       payload: { ok: true },
       createdAt,
+      schemaVersion: 1,
     };
     const checksum = computeOperationChecksum(baseInput);
 
@@ -137,6 +144,7 @@ describe('Operation Integrity & Canonicalization', () => {
       status: 'PENDING',
       appliedAt: null,
       checksum,
+      schemaVersion: 1,
     };
 
     // Tamper entityId
@@ -150,5 +158,63 @@ describe('Operation Integrity & Canonicalization', () => {
 
     // Tamper createdAt
     assert.strictEqual(verifyOperationIntegrity({ ...baseOp, createdAt: '2026-10-02T12:00:00.000Z' }), false);
+  });
+
+  it('verifies V1 and V2 using only their declared checksum formula', () => {
+    const common = {
+      operationId: 'op-version-formula',
+      nodeId: 'node-A',
+      sequenceNumber: 1,
+      operationType: 'CREATE' as const,
+      entityType: 'task',
+      entityId: 'task-version-formula',
+      payload: { value: true },
+      status: 'PENDING' as const,
+      createdAt: '2026-10-01T12:00:00.000Z',
+      appliedAt: null,
+      checksum: '',
+      errorMessage: null,
+    };
+    const v1 = { ...common, schemaVersion: 1 as const };
+    const v2 = { ...common, schemaVersion: 2 as const };
+    v1.checksum = computeOperationChecksum(v1);
+    v2.checksum = computeOperationChecksum(v2);
+
+    assert.strictEqual(verifyOperationIntegrity(v1), true);
+    assert.strictEqual(verifyOperationIntegrity(v2), true);
+    assert.strictEqual(verifyOperationIntegrity({ ...v1, schemaVersion: 2 }), false);
+    assert.strictEqual(verifyOperationIntegrity({ ...v2, schemaVersion: 1 }), false);
+  });
+
+  it('rejects missing and unsupported schema versions without checksum probing', () => {
+    const versioned = {
+      operationId: 'op-unsupported-version',
+      nodeId: 'node-A',
+      sequenceNumber: 1,
+      operationType: 'CREATE' as const,
+      entityType: 'task',
+      entityId: 'task-unsupported-version',
+      payload: { value: true },
+      status: 'PENDING' as const,
+      createdAt: '2026-10-01T12:00:00.000Z',
+      appliedAt: null,
+      checksum: '',
+      errorMessage: null,
+      schemaVersion: 2 as const,
+    };
+    versioned.checksum = computeOperationChecksum(versioned);
+
+    assert.strictEqual(
+      verifyOperationIntegrity({ ...versioned, schemaVersion: undefined }),
+      false
+    );
+    assert.strictEqual(
+      verifyOperationIntegrity({ ...versioned, schemaVersion: 99 }),
+      false
+    );
+    assert.throws(
+      () => computeOperationChecksum({ ...versioned, schemaVersion: undefined as unknown as number }),
+      /Unsupported operation schema version/
+    );
   });
 });

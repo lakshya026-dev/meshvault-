@@ -3,21 +3,26 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { INITIAL_SCHEMA } from './schema.js';
 import { DatabaseError, MeshVaultError } from '../errors.js';
+import { computeOperationChecksum } from '../operations/integrity.js';
+import { isSupportedSchemaVersion } from '../operations/types.js';
 
 export interface DatabaseOptions {
   dbPath?: string;
   readonly?: boolean;
+  historicalOperationSchemaVersion?: number;
 }
 
 export class DatabaseManager {
   private db: DatabaseSync;
   private inTransaction = false;
   private readonly readOnly: boolean;
+  private readonly historicalOperationSchemaVersion?: number;
 
   constructor(options: DatabaseOptions = {}) {
     try {
       const dbPath = options.dbPath ?? path.resolve(process.cwd(), 'data', 'meshvault.db');
       this.readOnly = options.readonly ?? false;
+      this.historicalOperationSchemaVersion = options.historicalOperationSchemaVersion;
 
       if (dbPath !== ':memory:' && !this.readOnly) {
         const dir = path.dirname(dbPath);
@@ -80,6 +85,104 @@ export class DatabaseManager {
     if (!columnNames.has('error_message')) {
       this.db.exec('ALTER TABLE operations ADD COLUMN error_message TEXT;');
     }
+
+    const versionColumn = columns.find((column) => column.name === 'schema_version') as
+      | { name: string; notnull?: number }
+      | undefined;
+    if (!versionColumn) {
+      this.db.exec('ALTER TABLE operations ADD COLUMN schema_version INTEGER;');
+    }
+
+    const unresolvedRows = this.db
+      .prepare('SELECT * FROM operations WHERE schema_version IS NULL')
+      .all() as Array<{
+      operation_id: string;
+      node_id: string;
+      sequence_number: number;
+      operation_type: string;
+      entity_type: string;
+      entity_id: string;
+      payload: string;
+      created_at: string;
+      checksum: string;
+    }>;
+
+    if (unresolvedRows.length > 0) {
+      const explicitVersion = this.historicalOperationSchemaVersion;
+      if (!isSupportedSchemaVersion(explicitVersion)) {
+        throw new DatabaseError(
+          'Operation schema migration requires an explicit supported historicalOperationSchemaVersion for unresolved rows.'
+        );
+      }
+
+      for (const row of unresolvedRows) {
+        const expectedChecksum = computeOperationChecksum({
+          operationId: row.operation_id,
+          nodeId: row.node_id,
+          sequenceNumber: row.sequence_number,
+          operationType: row.operation_type,
+          entityType: row.entity_type,
+          entityId: row.entity_id,
+          payload: JSON.parse(row.payload) as unknown,
+          createdAt: row.created_at,
+          schemaVersion: explicitVersion,
+        });
+        if (row.checksum.toLowerCase() !== expectedChecksum.toLowerCase()) {
+          throw new DatabaseError(
+            `Historical operation '${row.operation_id}' does not match the explicitly declared schema version ${explicitVersion}.`
+          );
+        }
+        this.db
+          .prepare('UPDATE operations SET schema_version = ? WHERE operation_id = ?')
+          .run(explicitVersion, row.operation_id);
+      }
+    }
+
+    const migratedColumns = this.db
+      .prepare('PRAGMA table_info(operations)')
+      .all() as Array<{ name: string; notnull: number }>;
+    const migratedVersionColumn = migratedColumns.find(
+      (column) => column.name === 'schema_version'
+    );
+    if (migratedVersionColumn && migratedVersionColumn.notnull === 0) {
+      this.rebuildOperationsTableWithRequiredSchemaVersion();
+    }
+  }
+
+  private rebuildOperationsTableWithRequiredSchemaVersion(): void {
+    this.db.exec(`
+      CREATE TABLE operations_versioned (
+        operation_id TEXT PRIMARY KEY,
+        node_id TEXT NOT NULL,
+        sequence_number INTEGER NOT NULL,
+        operation_type TEXT NOT NULL,
+        entity_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'PENDING',
+        created_at TEXT NOT NULL,
+        applied_at TEXT,
+        checksum TEXT NOT NULL DEFAULT '',
+        error_message TEXT,
+        schema_version INTEGER NOT NULL
+      );
+      INSERT INTO operations_versioned (
+        operation_id, node_id, sequence_number, operation_type,
+        entity_type, entity_id, payload, status, created_at, applied_at,
+        checksum, error_message, schema_version
+      )
+      SELECT operation_id, node_id, sequence_number, operation_type,
+        entity_type, entity_id, payload, status, created_at, applied_at,
+        checksum, error_message, schema_version
+      FROM operations;
+      DROP TABLE operations;
+      ALTER TABLE operations_versioned RENAME TO operations;
+      CREATE UNIQUE INDEX idx_operations_node_seq ON operations(node_id, sequence_number);
+      CREATE INDEX idx_operations_status ON operations(status);
+      CREATE INDEX idx_operations_entity ON operations(entity_type, entity_id);
+      CREATE INDEX idx_operations_node_status ON operations(node_id, status);
+      CREATE INDEX idx_operations_node_seq_range ON operations(node_id, sequence_number ASC);
+    `);
   }
 
   private migrateRecordsIdentity(): void {

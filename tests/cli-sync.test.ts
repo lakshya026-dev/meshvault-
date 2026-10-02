@@ -51,6 +51,8 @@ function withEnvironment<T>(values: Record<string, string | undefined>, action: 
 
 describe('CLI synchronization commands', () => {
   it('uses the default database path and sync port without environment variables', () => {
+    const defaultDbPath = path.resolve(process.cwd(), 'data', 'meshvault.db');
+    cleanupTestFile(defaultDbPath);
     const app = withEnvironment(
       { MESHVAULT_DB_PATH: undefined, MESHVAULT_PORT: undefined, MESHVAULT_SYNC_PORT: undefined },
       () => initMeshVault(undefined, 'node-config-default')
@@ -60,6 +62,7 @@ describe('CLI synchronization commands', () => {
       assert.strictEqual(withEnvironment({ MESHVAULT_PORT: undefined, MESHVAULT_SYNC_PORT: undefined }, resolveSyncPort), 3000);
     } finally {
       app.db.close();
+      cleanupTestFile(defaultDbPath);
     }
   });
 

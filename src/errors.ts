@@ -61,3 +61,17 @@ export class NetworkError extends MeshVaultError {
     this.name = 'NetworkError';
   }
 }
+
+export class UnsupportedSchemaVersionError extends MeshVaultError {
+  constructor(public readonly version: unknown) {
+    super(`Unsupported operation schema version: '${String(version)}'.`);
+    this.name = 'UnsupportedSchemaVersionError';
+  }
+}
+
+export class VersionMismatchError extends MeshVaultError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VersionMismatchError';
+  }
+}

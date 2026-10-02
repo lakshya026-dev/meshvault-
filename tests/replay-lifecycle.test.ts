@@ -68,6 +68,7 @@ describe('Operation Replay & Lifecycle State Machine', () => {
       entityId: originalOp.entityId,
       payload: { amount: 999999 }, // modified!
       createdAt: originalOp.createdAt,
+      schemaVersion: originalOp.schemaVersion,
     });
 
     const modifiedOp = {
@@ -111,14 +112,15 @@ describe('Operation Replay & Lifecycle State Machine', () => {
       entityId: 'task-resumed',
       payload: { status: 'reconciled' },
       createdAt,
+      schemaVersion: 1,
     });
 
     db.getRawDb()
       .prepare(
         `INSERT INTO operations (
           operation_id, node_id, sequence_number, operation_type,
-          entity_type, entity_id, payload, status, created_at, checksum
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          entity_type, entity_id, payload, status, created_at, checksum, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         'op-resume-1',
@@ -130,7 +132,8 @@ describe('Operation Replay & Lifecycle State Machine', () => {
         JSON.stringify({ status: 'reconciled' }),
         'PENDING',
         createdAt,
-        checksum
+        checksum,
+        1
       );
 
     // Verify it is currently PENDING in DB
@@ -179,6 +182,7 @@ describe('Operation Replay & Lifecycle State Machine', () => {
       createdAt,
       appliedAt: null,
       checksum: '',
+      schemaVersion: 1,
     };
     dupSeqOp.checksum = computeOperationChecksum(dupSeqOp);
 

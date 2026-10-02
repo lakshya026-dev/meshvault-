@@ -1,5 +1,11 @@
 import { InvalidOperationError } from '../errors.js';
-import { CreateOperationInput, Operation, OperationType, OperationStatus } from './types.js';
+import {
+  CreateOperationInput,
+  Operation,
+  OperationType,
+  OperationStatus,
+  isSupportedSchemaVersion,
+} from './types.js';
 
 const VALID_OPERATION_TYPES: ReadonlySet<OperationType> = new Set(['CREATE', 'UPDATE', 'DELETE']);
 const VALID_STATUSES: ReadonlySet<OperationStatus> = new Set(['PENDING', 'APPLIED', 'FAILED']);
@@ -78,6 +84,12 @@ export class OperationValidator {
     }
 
     this.validatePayload(operation.payload);
+
+    if (!isSupportedSchemaVersion(operation.schemaVersion)) {
+      throw new InvalidOperationError(
+        `Unsupported operation schema version: '${String(operation.schemaVersion)}'.`
+      );
+    }
 
     if (!operation.status || !VALID_STATUSES.has(operation.status)) {
       throw new InvalidOperationError(

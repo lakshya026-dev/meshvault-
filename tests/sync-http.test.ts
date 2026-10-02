@@ -31,6 +31,7 @@ function remoteOperation(
     createdAt: new Date().toISOString(),
     appliedAt: null,
     checksum: '',
+    schemaVersion: 1,
   };
   operation.checksum = computeOperationChecksum(operation);
   return operation;
@@ -157,6 +158,7 @@ describe('Sync HTTP server', () => {
         status: 'APPLIED',
         appliedAt: result.body.operations[0].appliedAt,
         errorMessage: null,
+        schemaVersion: 1,
       });
     } finally {
       await stopNode(node);

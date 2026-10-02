@@ -17,6 +17,7 @@ describe('OperationValidator', () => {
     createdAt: new Date().toISOString(),
     appliedAt: null,
     checksum: 'a'.repeat(64),
+    schemaVersion: 1,
     errorMessage: null,
   };
 
