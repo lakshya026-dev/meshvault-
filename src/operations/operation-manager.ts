@@ -34,6 +34,7 @@ interface RawOperationRow {
   checksum: string;
   error_message: string | null;
   schema_version: number;
+  causal_dependencies?: string;
 }
 
 interface RawRecordRow {
@@ -123,10 +124,20 @@ export class OperationManager {
         `op-${String(sequenceNumber).padStart(3, '0')}-${randomUUID().slice(0, 6)}`;
       const createdAt = new Date().toISOString();
 
-      // Normalize schemaVersion: use input value if supplied, otherwise default to CURRENT_SCHEMA_VERSION.
-      // Legacy/unversioned input (schemaVersion omitted) gets CURRENT_SCHEMA_VERSION for newly created ops.
-      const schemaVersion: number =
-        typeof input.schemaVersion === 'number' ? input.schemaVersion : CURRENT_SCHEMA_VERSION;
+      // Determine schema version based on explicit input.
+      // The validator (validateCreateInput at line 93) already rejects nonempty
+      // causalDependencies when schemaVersion is omitted, so v3 must be explicit.
+      let resolvedSchemaVersion: number;
+      if (typeof input.schemaVersion === 'number') {
+        if (input.causalDependencies && input.causalDependencies.length > 0 && input.schemaVersion !== 3) {
+          throw new InvalidOperationError(
+            'Causal dependencies require schemaVersion 3 for operation persistence.'
+          );
+        }
+        resolvedSchemaVersion = input.schemaVersion;
+      } else {
+        resolvedSchemaVersion = CURRENT_SCHEMA_VERSION;
+      }
 
       // Compute deterministic SHA-256 integrity checksum.
       // schemaVersion participates in the canonical hash for v2+ operations
@@ -140,7 +151,8 @@ export class OperationManager {
         entityId: input.entityId,
         payload: input.payload,
         createdAt,
-        schemaVersion,
+        schemaVersion: resolvedSchemaVersion,
+        causalDependencies: input.causalDependencies,
       });
 
       const operation: Operation<T> = {
@@ -156,7 +168,8 @@ export class OperationManager {
         appliedAt: null,
         checksum,
         errorMessage: null,
-        schemaVersion,
+        schemaVersion: resolvedSchemaVersion,
+        causalDependencies: input.causalDependencies,
       };
 
       // Validate the constructed operation
@@ -168,8 +181,8 @@ export class OperationManager {
           `INSERT INTO operations (
             operation_id, node_id, sequence_number, operation_type,
             entity_type, entity_id, payload, status, created_at, applied_at,
-            checksum, error_message, schema_version
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            checksum, error_message, schema_version, causal_dependencies
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           operation.operationId,
@@ -184,7 +197,8 @@ export class OperationManager {
           null,
           operation.checksum,
           null,
-          operation.schemaVersion
+          operation.schemaVersion,
+          JSON.stringify(operation.causalDependencies ?? [])
         );
 
       // 2. Apply operation to local state and transition PENDING -> APPLIED
@@ -479,6 +493,28 @@ export class OperationManager {
     }
     const schemaVersion = row.schema_version;
 
+    let causalDependencies: string[] | undefined;
+    if (row.causal_dependencies) {
+      try {
+        const parsed = JSON.parse(row.causal_dependencies);
+        if (Array.isArray(parsed)) {
+          if (parsed.length === 0) {
+            causalDependencies = [];
+          } else if (parsed.every((v: unknown) => typeof v === 'string')) {
+            causalDependencies = parsed as string[];
+          } else {
+            throw new InvalidOperationError('Malformed causal_dependencies: all elements must be strings.');
+          }
+        } else {
+          throw new InvalidOperationError('Malformed causal_dependencies: expected an array of strings.');
+        }
+      } catch (e) {
+        // Fail fast on malformed persisted dependency metadata
+        if (e instanceof Error) throw new InvalidOperationError(`Malformed persisted causal_dependencies: ${e.message}`);
+        throw new InvalidOperationError('Malformed persisted causal_dependencies.');
+      }
+    }
+
     return {
       operationId: row.operation_id,
       nodeId: row.node_id,
@@ -493,6 +529,7 @@ export class OperationManager {
       checksum: row.checksum,
       errorMessage: row.error_message,
       schemaVersion,
+      ...(causalDependencies ? { causalDependencies } : {}),
     };
   }
 

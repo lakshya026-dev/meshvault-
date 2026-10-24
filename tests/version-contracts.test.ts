@@ -16,17 +16,18 @@ describe('Phase 5 Step 2 — Version Contracts & Types', () => {
   it('exports valid schema version constants', () => {
     assert.strictEqual(MIN_SUPPORTED_SCHEMA_VERSION, 1);
     assert.strictEqual(CURRENT_SCHEMA_VERSION, 2);
-    assert.deepStrictEqual(Array.from(SUPPORTED_SCHEMA_VERSIONS), [1, 2]);
+    assert.deepStrictEqual(Array.from(SUPPORTED_SCHEMA_VERSIONS), [1, 2, 3]);
   });
 
-  it('validates supported operation schema versions (1 and 2)', () => {
+  it('validates supported operation schema versions (1, 2, and 3)', () => {
     assert.strictEqual(isSupportedSchemaVersion(1), true);
     assert.strictEqual(isSupportedSchemaVersion(2), true);
+    assert.strictEqual(isSupportedSchemaVersion(3), true);
   });
 
   it('detects unsupported schema versions', () => {
     assert.strictEqual(isSupportedSchemaVersion(0), false);
-    assert.strictEqual(isSupportedSchemaVersion(3), false);
+    assert.strictEqual(isSupportedSchemaVersion(4), false);
     assert.strictEqual(isSupportedSchemaVersion(99), false);
     assert.strictEqual(isSupportedSchemaVersion(-1), false);
   });

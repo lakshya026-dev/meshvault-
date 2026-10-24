@@ -86,11 +86,13 @@ export class DatabaseManager {
       this.db.exec('ALTER TABLE operations ADD COLUMN error_message TEXT;');
     }
 
-    const versionColumn = columns.find((column) => column.name === 'schema_version') as
-      | { name: string; notnull?: number }
-      | undefined;
-    if (!versionColumn) {
+    if (!columnNames.has('schema_version')) {
       this.db.exec('ALTER TABLE operations ADD COLUMN schema_version INTEGER;');
+    }
+
+    // Add new causal_dependencies column if missing (Phase 6.2)
+    if (!columnNames.has('causal_dependencies')) {
+      this.db.exec('ALTER TABLE operations ADD COLUMN causal_dependencies TEXT;');
     }
 
     const unresolvedRows = this.db
@@ -164,16 +166,17 @@ export class DatabaseManager {
         applied_at TEXT,
         checksum TEXT NOT NULL DEFAULT '',
         error_message TEXT,
-        schema_version INTEGER NOT NULL
+        schema_version INTEGER NOT NULL,
+        causal_dependencies TEXT
       );
       INSERT INTO operations_versioned (
         operation_id, node_id, sequence_number, operation_type,
         entity_type, entity_id, payload, status, created_at, applied_at,
-        checksum, error_message, schema_version
+        checksum, error_message, schema_version, causal_dependencies
       )
       SELECT operation_id, node_id, sequence_number, operation_type,
         entity_type, entity_id, payload, status, created_at, applied_at,
-        checksum, error_message, schema_version
+        checksum, error_message, schema_version, causal_dependencies
       FROM operations;
       DROP TABLE operations;
       ALTER TABLE operations_versioned RENAME TO operations;
@@ -184,6 +187,7 @@ export class DatabaseManager {
       CREATE INDEX idx_operations_node_seq_range ON operations(node_id, sequence_number ASC);
     `);
   }
+
 
   private migrateRecordsIdentity(): void {
     const columns = this.db

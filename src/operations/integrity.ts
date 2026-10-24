@@ -18,8 +18,11 @@ export interface OperationChecksumInput {
    * - 1: Uses the original 8-field canonical representation.
    * - 2: Appends schemaVersion as a 9th field, making version tampering
    *   detectable.
+   * - 3: Appends schemaVersion as 9th field and canonical causalDependencies
+   *   as 10th field.
    */
   schemaVersion: number;
+  causalDependencies?: string[];
 }
 
 /**
@@ -88,6 +91,41 @@ function computeV2Checksum(
 }
 
 /**
+ * V3 (causal) checksum formula — 10 fields joined by ':'.
+ *
+ *   SHA-256( operationId:nodeId:sequenceNumber:operationType:entityType:entityId:canonicalPayload:createdAt:schemaVersion:canonicalDependencies )
+ *
+ * Appends canonicalDependencies as the 10th field so that any alteration to
+ * causal dependencies invalidates the checksum.
+ */
+function computeV3Checksum(
+  operationId: string,
+  nodeId: string,
+  sequenceNumber: number,
+  operationType: string,
+  entityType: string,
+  entityId: string,
+  canonicalPayload: string,
+  createdAt: string,
+  schemaVersion: number,
+  canonicalDependencies: string
+): string {
+  const content = [
+    operationId,
+    nodeId,
+    String(sequenceNumber),
+    operationType,
+    entityType,
+    entityId,
+    canonicalPayload,
+    createdAt,
+    String(schemaVersion),
+    canonicalDependencies,
+  ].join(':');
+  return createHash('sha256').update(content, 'utf8').digest('hex');
+}
+
+/**
  * Computes a deterministic SHA-256 integrity checksum for an operation.
  *
  * The explicitly declared schemaVersion selects exactly one supported formula.
@@ -99,6 +137,22 @@ export function computeOperationChecksum(input: OperationChecksumInput): string 
     throw new UnsupportedSchemaVersionError(input.schemaVersion);
   }
   const version = input.schemaVersion;
+
+  if (version === 3) {
+    const canonicalDependencies = serializeCanonical(input.causalDependencies ?? []);
+    return computeV3Checksum(
+      input.operationId,
+      input.nodeId,
+      input.sequenceNumber,
+      input.operationType,
+      input.entityType,
+      input.entityId,
+      canonicalPayload,
+      input.createdAt,
+      version,
+      canonicalDependencies
+    );
+  }
 
   if (version === 2) {
     return computeV2Checksum(
@@ -152,6 +206,7 @@ export function verifyOperationIntegrity(operation: Operation): boolean {
     payload: operation.payload,
     createdAt: operation.createdAt,
     schemaVersion: operation.schemaVersion,
+    causalDependencies: operation.causalDependencies,
   });
 
   return operation.checksum.toLowerCase() === expectedChecksum.toLowerCase();

@@ -5,6 +5,7 @@ import {
   OperationType,
   OperationStatus,
   isSupportedSchemaVersion,
+  CURRENT_SCHEMA_VERSION,
 } from './types.js';
 
 const VALID_OPERATION_TYPES: ReadonlySet<OperationType> = new Set(['CREATE', 'UPDATE', 'DELETE']);
@@ -41,6 +42,19 @@ export class OperationValidator {
         throw new InvalidOperationError('Explicit operation ID must be a non-empty string.');
       }
     }
+
+    const effectiveSchemaVersion =
+      typeof input.schemaVersion === 'number' ? input.schemaVersion : CURRENT_SCHEMA_VERSION;
+    if (input.schemaVersion !== undefined && !isSupportedSchemaVersion(input.schemaVersion)) {
+      throw new InvalidOperationError(
+        `Unsupported operation schema version: '${String(input.schemaVersion)}'.`
+      );
+    }
+    this.validateCausalDependencies(
+      input.causalDependencies,
+      effectiveSchemaVersion,
+      input.operationId
+    );
   }
 
   /**
@@ -105,6 +119,65 @@ export class OperationValidator {
 
     if (!operation.checksum || typeof operation.checksum !== 'string' || !HEX_64_REGEX.test(operation.checksum)) {
       throw new InvalidOperationError('Operation checksum must be a 64-character hex SHA-256 string.');
+    }
+
+    this.validateCausalDependencies(
+      operation.causalDependencies,
+      operation.schemaVersion,
+      operation.operationId
+    );
+  }
+
+  /**
+   * Validates schema-version-aware causal dependencies.
+   */
+  public static validateCausalDependencies(
+    causalDependencies: unknown,
+    schemaVersion: number,
+    operationId?: string
+  ): void {
+    if (schemaVersion === 1 || schemaVersion === 2) {
+      if (causalDependencies !== undefined && causalDependencies !== null) {
+        if (!Array.isArray(causalDependencies) || causalDependencies.length > 0) {
+          throw new InvalidOperationError(
+            `Schema version ${schemaVersion} operations must not specify causal dependencies.`
+          );
+        }
+      }
+      return;
+    }
+
+    if (schemaVersion === 3) {
+      if (!Array.isArray(causalDependencies)) {
+        throw new InvalidOperationError(
+          "Schema version 3 operations require 'causalDependencies' to be an array."
+        );
+      }
+
+      for (let i = 0; i < causalDependencies.length; i++) {
+        const dep = causalDependencies[i];
+        if (typeof dep !== 'string' || dep.trim() === '') {
+          throw new InvalidOperationError('Causal dependencies must contain non-empty strings.');
+        }
+        if (dep !== dep.trim()) {
+          throw new InvalidOperationError('Causal dependencies must not contain untrimmed whitespace.');
+        }
+        if (operationId !== undefined && dep === operationId) {
+          throw new InvalidOperationError(`Operation cannot depend on itself: '${operationId}'.`);
+        }
+        if (i > 0) {
+          const prev = causalDependencies[i - 1] as string;
+          if (prev === dep) {
+            throw new InvalidOperationError(`Duplicate causal dependency: '${dep}'.`);
+          }
+          if (prev > dep) {
+            throw new InvalidOperationError(
+              'Causal dependencies must be strictly lexicographically sorted.'
+            );
+          }
+        }
+      }
+      return;
     }
   }
 

@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS operations (
   applied_at TEXT,
   checksum TEXT NOT NULL DEFAULT '',
   error_message TEXT,
-  schema_version INTEGER NOT NULL
+  schema_version INTEGER NOT NULL,
+  causal_dependencies TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_operations_node_seq ON operations(node_id, sequence_number);

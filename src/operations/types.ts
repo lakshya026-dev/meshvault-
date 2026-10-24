@@ -4,7 +4,7 @@ export type OperationStatus = 'PENDING' | 'APPLIED' | 'FAILED';
 
 export const MIN_SUPPORTED_SCHEMA_VERSION = 1;
 export const CURRENT_SCHEMA_VERSION = 2;
-export const SUPPORTED_SCHEMA_VERSIONS: ReadonlyArray<number> = [1, 2];
+export const SUPPORTED_SCHEMA_VERSIONS: ReadonlyArray<number> = [1, 2, 3];
 
 export function isSupportedSchemaVersion(version: unknown): version is number {
   return (
@@ -29,6 +29,8 @@ export interface Operation<T = Record<string, unknown>> {
   errorMessage?: string | null;
   /** Explicit operation schema version. Always set on normalized/persisted operations. */
   schemaVersion: number;
+  /** Direct causal predecessors for this entity (required array for schema v3+). */
+  causalDependencies?: string[];
 }
 
 export interface CreateOperationInput<T = Record<string, unknown>> {
@@ -38,6 +40,7 @@ export interface CreateOperationInput<T = Record<string, unknown>> {
   payload: T;
   operationId?: string;
   schemaVersion?: number;
+  causalDependencies?: string[];
 }
 
 export interface RecordEntity<T = Record<string, unknown>> {
