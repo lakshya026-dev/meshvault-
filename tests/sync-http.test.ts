@@ -81,7 +81,11 @@ describe('Sync HTTP server', () => {
     try {
       const result = await getJson(`${node.baseUrl}/sync/status`);
       assert.strictEqual(result.status, 200);
-      assert.deepStrictEqual(result.body, { nodeId: 'node-empty', sequences: {} });
+      assert.deepStrictEqual(result.body, {
+        nodeId: 'node-empty',
+        sequences: {},
+        protocol: { currentVersion: 1, supportedVersions: [1] },
+      });
     } finally {
       await stopNode(node);
     }
@@ -107,6 +111,7 @@ describe('Sync HTTP server', () => {
       assert.deepStrictEqual(result.body, {
         nodeId: 'node-local',
         sequences: { 'node-local': 2 },
+        protocol: { currentVersion: 1, supportedVersions: [1] },
       });
     } finally {
       await stopNode(node);

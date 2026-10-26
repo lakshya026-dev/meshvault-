@@ -1,4 +1,7 @@
 import type { OperationManager } from '../operations/operation-manager.js';
+import { CURRENT_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, type ProtocolCapabilities, commonProtocolVersions } from './protocol.js';
+import { ProtocolVersionMismatchError } from '../errors.js';
+
 import { serializeCanonical } from '../operations/canonical.js';
 import { verifyOperationIntegrity } from '../operations/integrity.js';
 import type { Operation, OperationType } from '../operations/types.js';
@@ -184,6 +187,12 @@ function sameContent(left: Operation, right: Operation): boolean {
   );
 }
 
+export interface SyncStatusResponse {
+  nodeId: string;
+  sequences: Record<string, number>;
+  protocol: ProtocolCapabilities;
+}
+
 export class SyncManager {
   private static readonly transferBatchSize = 1_000;
   private readonly retryOptions: Required<RetryOptions>;
@@ -203,10 +212,14 @@ export class SyncManager {
     };
   }
 
-  public getSyncStatus(): { nodeId: string; sequences: Record<string, number> } {
+  public getSyncStatus(): SyncStatusResponse {
     return {
       nodeId: this.localNodeId,
       sequences: this.operationManager.getSequenceVector(),
+      protocol: {
+        currentVersion: CURRENT_PROTOCOL_VERSION,
+        supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
+      },
     };
   }
 
@@ -301,6 +314,16 @@ export class SyncManager {
   public async syncWithPeer(peerUrl: string): Promise<PeerSyncResult> {
     const baseUrl = peerUrl.endsWith('/') ? peerUrl.slice(0, -1) : peerUrl;
     const peerStatus = await this.fetchJson(`${baseUrl}/sync/status`);
+
+    // Validate and negotiate protocol version
+    const peerProtocol = this.parsePeerProtocol(peerStatus);
+    const localCapabilities: ProtocolCapabilities = {
+      currentVersion: CURRENT_PROTOCOL_VERSION,
+      supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
+    };
+    const negotiatedVersion = commonProtocolVersions(localCapabilities, peerProtocol);
+    // negotiatedVersion is unused for now (only v1 is implemented); wire format is unchanged.
+
     const peerSequences = this.parsePeerSequences(peerStatus);
     const pulled: ReceiveOperationsResult = {
       results: [],
@@ -489,6 +512,44 @@ export class SyncManager {
       sequences[nodeId] = sequence;
     }
     return sequences;
+  }
+
+  private parsePeerProtocol(value: unknown): ProtocolCapabilities {
+    if (!isRecord(value)) {
+      throw new Error('Peer returned a malformed status response.');
+    }
+    const rawProtocol = value.protocol;
+    // If missing — treat as legacy peer or fixture (backward-compat path)
+    if (rawProtocol === undefined) {
+      return {
+        currentVersion: CURRENT_PROTOCOL_VERSION,
+        supportedVersions: [...SUPPORTED_PROTOCOL_VERSIONS],
+      };
+    }
+    if (!isRecord(rawProtocol)) {
+      throw new Error('Peer returned a malformed protocol capabilities response.');
+    }
+    const { currentVersion, supportedVersions } = rawProtocol;
+    if (
+      typeof currentVersion !== 'number' ||
+      !Number.isSafeInteger(currentVersion) ||
+      currentVersion < 1
+    ) {
+      throw new Error('Peer returned an invalid protocol currentVersion.');
+    }
+    if (
+      !Array.isArray(supportedVersions) ||
+      supportedVersions.length === 0 ||
+      !supportedVersions.every(
+        (v: unknown) => typeof v === 'number' && Number.isInteger(v) && v > 0
+      )
+    ) {
+      throw new Error('Peer returned an invalid protocol supportedVersions.');
+    }
+    return {
+      currentVersion,
+      supportedVersions: [...supportedVersions],
+    };
   }
 
   private parsePeerOperations(value: unknown): unknown[] {

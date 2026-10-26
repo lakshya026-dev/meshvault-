@@ -75,3 +75,12 @@ export class VersionMismatchError extends MeshVaultError {
     this.name = 'VersionMismatchError';
   }
 }
+
+// Minimal protocol negotiation error (internal to sync)
+export class ProtocolVersionMismatchError extends MeshVaultError {
+  constructor(public readonly localVersions: number[], public readonly remoteVersions: number[]) {
+    const message = `Protocol version mismatch. Local=${JSON.stringify(localVersions)} Remote=${JSON.stringify(remoteVersions)}`;
+    super(message);
+    this.name = 'ProtocolVersionMismatchError';
+  }
+}
