@@ -63,6 +63,15 @@ describe('REPL Command Parser', () => {
     assert.deepStrictEqual(JSON.parse(args[3]), { title: 'Learn Distributed Systems' });
   });
 
+  it('parses JSON payloads containing escaped quotes without splitting arguments', () => {
+    const args = parseCommandLine('create task task-001 {"title":"Say \\\"hello\\\""}');
+    assert.strictEqual(args[0], 'create');
+    assert.strictEqual(args[1], 'task');
+    assert.strictEqual(args[2], 'task-001');
+    assert.strictEqual(args[3], '{"title":"Say \\\"hello\\\""}');
+    assert.deepStrictEqual(JSON.parse(args[3]), { title: 'Say "hello"' });
+  });
+
   it('parses standard commands correctly', () => {
     const args = parseCommandLine('delete task task-001');
     assert.deepStrictEqual(args, ['delete', 'task', 'task-001']);
